@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SENTINEL · Smart Surveillance</title>
+<style>
+:root {
+  /* surfaces */
+  --bg: #0a0a1a;
+  --panel: #111827;
+  --panel-2: #0f172a;
+  --border: #1f2937;
+  --muted: #4b5563;
+
+  /* detection palette — kept in sync with core/frame_annotator.py */
+  --c-fire: #ff2e63;       /* red    */
+  --c-face: #00d4ff;       /* cyan   */
+  --c-pose: #00ff88;       /* green  */
+  --c-suspicious: #ffb700; /* yellow */
+  --c-weapon: #ff6b35;     /* orange */
+  --c-injury: #ff6b35;     /* orange */
+
+  /* legacy aliases (state colours, status, etc.) */
+  --accent: var(--c-pose);
+  --warn: var(--c-weapon);
+  --danger: var(--c-fire);
+  --info: var(--c-face);
+  --text: #e5e7eb;
+  --dim: #9ca3af;
+  --shadow-accent: 0 0 18px rgba(0, 255, 136, 0.18);
+  --shadow-danger: 0 0 22px rgba(255, 46, 99, 0.25);
+  --shadow-info: 0 0 18px rgba(0, 212, 255, 0.18);
+
+  /* layout */
+  --gap: 16px;
+  --pad: 16px;
+  --radius: 10px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+}
+
+/* ---------------------------------------------------------- top bar */
+.topbar {
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  align-items: center; padding: 14px 28px;
+  background: linear-gradient(180deg, #0a0a1a, #07070f);
+  border-bottom: 1px solid var(--border);
+}
+.brand {
+  font-weight: 800; font-size: 22px; letter-spacing: 4px;
+  background: linear-gradient(90deg, var(--accent), var(--info));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+.brand-sub { font-size: 11px; color: var(--dim); letter-spacing: 3px; margin-top: 2px; }
+.clock { text-align: center; }
+.clock .time { font-size: 20px; font-weight: 600; letter-spacing: 1px; }
+.clock .date { font-size: 12px; color: var(--dim); margin-top: 2px; letter-spacing: 1px; }
+.conn { display: flex; align-items: center; justify-content: flex-end; gap: 14px; font-size: 13px; }
+.conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 8px var(--danger); transition: all 0.3s ease; }
+.conn-dot.online { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.uptime { color: var(--dim); font-family: 'Menlo', monospace; font-size: 12px; }
+
+/* ---------------------------------------------------------- layout */
+.container { padding: 16px 24px 24px; display: flex; flex-direction: column; gap: var(--gap); }
+.row { display: grid; gap: var(--gap); }
+.row-1 { grid-template-columns: minmax(0, 7fr) minmax(0, 3fr); }
+.row-2 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: var(--pad); transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  display: flex; flex-direction: column;
+}
+.panel.glow-danger { border-color: var(--danger); box-shadow: var(--shadow-danger); }
+.panel.glow-info  { border-color: var(--info);   box-shadow: var(--shadow-info); }
+.panel h2 {
+  font-size: 14px; color: var(--dim); letter-spacing: 3px;
+  text-transform: uppercase; margin-bottom: 12px; font-weight: 600;
+}
+
+/* ---------------------------------------------------------- video */
+.video-wrap {
+  position: relative; background: #000; border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--border); transition: all 0.3s ease;
+}
+.video-wrap.active { border-color: var(--info); box-shadow: var(--shadow-info); }
+.video-wrap img { display: block; width: 100%; height: auto; }
+.video-overlay-tl, .video-overlay-tr, .video-overlay-bl {
+  position: absolute; padding: 6px 10px; font-size: 12px; letter-spacing: 1px;
+  background: rgba(0, 0, 0, 0.55); border-radius: 6px; backdrop-filter: blur(4px);
+}
+.video-overlay-tl { top: 12px; left: 12px; display: flex; align-items: center; gap: 8px; }
+.video-overlay-tr { top: 12px; right: 12px; }
+.video-overlay-bl { bottom: 12px; left: 12px; }
+.rec-dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--danger);
+  box-shadow: 0 0 8px var(--danger); animation: blink 1.2s ease-in-out infinite;
+}
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.video-state-badge {
+  display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: 700;
+  font-size: 12px; letter-spacing: 2px;
+}
+.video-overlay-tr.lowfps { color: var(--danger); }
+.disconnected-overlay {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.85);
+  display: none; align-items: center; justify-content: center;
+  color: var(--danger); font-weight: 700; letter-spacing: 4px;
+}
+.video-wrap.disconnected .disconnected-overlay { display: flex; }
+
+/* ---------------------------------------------------------- system status */
+.state-text {
+  font-size: 24px; font-weight: 800; letter-spacing: 2px;
+  margin: 6px 0 4px; transition: all 0.3s ease;
+}
+.state-IDLE { color: var(--accent); text-shadow: 0 0 14px rgba(0, 255, 136, 0.3); }
+.state-VERIFYING_GESTURE,
+.state-VERIFYING_IDENTITY { color: var(--warn); text-shadow: 0 0 14px rgba(255, 107, 53, 0.3); }
+.state-ACTIVE_DETECTION { color: var(--danger); animation: pulse-state 1.5s ease-in-out infinite; }
+.state-COOLDOWN { color: var(--info); text-shadow: 0 0 14px rgba(0, 212, 255, 0.3); }
+@keyframes pulse-state {
+  0%, 100% { text-shadow: 0 0 14px rgba(255, 46, 99, 0.4); }
+  50%      { text-shadow: 0 0 26px rgba(255, 46, 99, 0.85); }
+}
+.state-duration { color: var(--dim); font-size: 12px; margin-bottom: 14px; font-family: 'Menlo', monospace; }
+.divider { height: 1px; background: var(--border); margin: 12px 0; }
+
+.kv-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; }
+.kv-row .k { color: var(--dim); font-size: 12px; }
+.kv-row .v { color: var(--text); font-family: 'Menlo', monospace; font-size: 12px; }
+
+.model-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 0; font-size: 13px;
+}
+.model-row .left { display: flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+.model-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: all 0.3s ease; }
+.model-dot.online     { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.model-dot.ready      { background: var(--info); box-shadow: 0 0 8px var(--info); }
+.model-dot.active     { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.model-dot.authorized { background: var(--info); box-shadow: 0 0 8px var(--info); }
+.model-dot.alert      { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-dot 1s ease-in-out infinite; }
+.model-dot.error      { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.model-status { font-size: 11px; color: var(--dim); letter-spacing: 1.5px; }
+.model-status.online     { color: var(--accent); }
+.model-status.ready      { color: var(--info); }
+.model-status.active     { color: var(--accent); }
+.model-status.authorized { color: var(--info); }
+.model-status.alert      { color: var(--danger); }
+.model-status.error      { color: var(--danger); }
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 8px var(--danger); }
+  50%      { box-shadow: 0 0 18px var(--danger); }
+}
+
+/* ---------------------------------------------------------- threat panel */
+.threat-list { display: flex; flex-direction: column; gap: 10px; }
+.threat-item {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  padding: 10px; border-radius: 6px; background: var(--panel-2);
+  border: 1px solid var(--border); border-left: 4px solid var(--muted);
+  animation: slide-in 0.3s ease;
+}
+.threat-item.primary { padding: 14px; box-shadow: 0 0 14px rgba(255, 46, 99, 0.18); }
+.threat-item.priority-CRITICAL { border-left-color: var(--c-fire);       box-shadow: 0 0 16px rgba(255, 46, 99, 0.28); }
+.threat-item.priority-HIGH     { border-left-color: var(--c-injury);     }
+.threat-item.priority-MEDIUM   { border-left-color: var(--c-suspicious); }
+.threat-item.priority-LOW      { border-left-color: var(--c-pose);       }
+.threat-item .pri-tag {
+  font-size: 10px; letter-spacing: 2px; font-weight: 800; padding: 2px 7px;
+  border-radius: 3px; background: var(--border); color: var(--text);
+  margin-right: 6px;
+}
+.threat-item.priority-CRITICAL .pri-tag { background: var(--c-fire);       color: #fff; }
+.threat-item.priority-HIGH     .pri-tag { background: var(--c-injury);     color: #1a0a04; }
+.threat-item.priority-MEDIUM   .pri-tag { background: var(--c-suspicious); color: #1a1402; }
+.threat-item.priority-LOW      .pri-tag { background: var(--c-pose);       color: #04130a; }
+@keyframes slide-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.threat-icon { font-size: 22px; }
+.threat-meta .label { font-size: 14px; font-weight: 600; display: flex; align-items: center; flex-wrap: wrap; }
+.threat-meta .sub   { font-size: 12px; color: var(--dim); margin-top: 2px; }
+.severity-bar { width: 80px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.severity-bar > div { height: 100%; transition: width 0.5s ease; }
+.all-clear { text-align: center; padding: 22px 0; color: var(--accent);
+  font-weight: 700; letter-spacing: 4px; font-size: 14px; }
+
+/* ---------------------------------------------------------- enrollment */
+.btn {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: 8px 14px; border-radius: 5px; font-size: 12px; cursor: pointer;
+  font-family: inherit; letter-spacing: 1px; transition: all 0.2s ease;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); color: #04130a; font-weight: 700; border-color: var(--accent); }
+.btn.primary:hover { box-shadow: var(--shadow-accent); }
+.btn.danger { color: var(--danger); }
+.btn.danger:hover { border-color: var(--danger); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.input {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: 8px 12px; border-radius: 5px; font-size: 13px; font-family: inherit;
+  width: 100%; outline: none; transition: border-color 0.2s ease;
+}
+.input:focus { border-color: var(--accent); }
+
+.face-status {
+  padding: 12px; border-radius: 6px; text-align: center; font-weight: 700;
+  letter-spacing: 1.5px; font-size: 14px; margin-bottom: 12px;
+  border: 1px solid var(--border); transition: all 0.3s ease;
+}
+.face-status.authorized {
+  background: rgba(0, 255, 136, 0.10); color: var(--accent);
+  border-color: rgba(0, 255, 136, 0.45); box-shadow: var(--shadow-accent);
+}
+.face-status.unauthorized {
+  background: rgba(255, 46, 99, 0.10); color: var(--danger);
+  border-color: rgba(255, 46, 99, 0.45); box-shadow: var(--shadow-danger);
+}
+.face-status.idle { background: var(--panel-2); color: var(--dim); }
+
+.enroll-form { display: flex; gap: 8px; margin-bottom: 12px; }
+.enroll-form .input { flex: 1; }
+.enroll-status {
+  font-size: 12px; padding: 8px; border-radius: 4px; margin-bottom: 12px;
+  display: none;
+}
+.enroll-status.show { display: block; }
+.enroll-status.info    { background: rgba(0, 212, 255, 0.08); color: var(--info);    border: 1px solid rgba(0, 212, 255, 0.30); }
+.enroll-status.success { background: rgba(0, 255, 136, 0.08); color: var(--accent);  border: 1px solid rgba(0, 255, 136, 0.30); }
+.enroll-status.error   { background: rgba(255, 46, 99, 0.08); color: var(--danger);  border: 1px solid rgba(255, 46, 99, 0.30); }
+
+.enrolled-list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
+.enrolled-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 10px; border-radius: 4px; background: var(--panel-2); font-size: 13px;
+}
+.enrolled-row .samples { color: var(--dim); font-size: 11px; margin-left: 8px; }
+
+/* ---------------------------------------------------------- alert center */
+.alert-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.alert-counter {
+  background: var(--danger); color: #fff; padding: 2px 10px; border-radius: 12px;
+  font-size: 11px; font-weight: 700; letter-spacing: 1px;
+}
+.alert-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
+.alert-row {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center;
+  padding: 8px 10px; border-radius: 5px; background: var(--panel-2);
+  font-size: 12px; border-left: 3px solid var(--muted);
+}
+.alert-row.fire        { border-left-color: var(--c-fire); }
+.alert-row.injury      { border-left-color: var(--c-injury); }
+.alert-row.suspicious  { border-left-color: var(--c-suspicious); }
+.alert-row.weapon      { border-left-color: var(--c-weapon); }
+.alert-row .ts   { color: var(--dim); font-family: 'Menlo', monospace; font-size: 11px; }
+.alert-row .desc { font-size: 12px; }
+.alert-row .icon { font-size: 16px; }
+
+.alert-controls { display: flex; gap: 8px; margin-top: 10px; }
+
+/* ---------------------------------------------------------- timeline */
+.timeline-wrap {
+  height: 100px; overflow-x: auto; overflow-y: hidden; padding: 4px 0;
+  scrollbar-width: thin;
+}
+.timeline {
+  display: inline-flex; gap: 10px; align-items: center; height: 100%;
+  padding: 0 4px;
+}
+.tl-node {
+  flex: 0 0 auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 110px; height: 70px; padding: 8px 10px; border-radius: 6px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  font-size: 12px; transition: all 0.3s ease;
+}
+.tl-node .tl-state { font-weight: 700; letter-spacing: 1px; margin-bottom: 4px; }
+.tl-node .tl-dur   { color: var(--dim); font-family: 'Menlo', monospace; font-size: 11px; }
+.tl-arrow { color: var(--muted); font-size: 14px; flex: 0 0 auto; }
+.tl-IDLE              { border-color: rgba(0, 255, 136, 0.4); }
+.tl-IDLE .tl-state    { color: var(--accent); }
+.tl-VERIFYING_GESTURE, .tl-VERIFYING_IDENTITY                     { border-color: rgba(255, 107, 53, 0.4); }
+.tl-VERIFYING_GESTURE .tl-state, .tl-VERIFYING_IDENTITY .tl-state { color: var(--warn); }
+.tl-ACTIVE_DETECTION  { border-color: rgba(255, 46, 99, 0.4); }
+.tl-ACTIVE_DETECTION .tl-state { color: var(--danger); }
+.tl-COOLDOWN          { border-color: rgba(0, 212, 255, 0.4); }
+.tl-COOLDOWN .tl-state { color: var(--info); }
+
+/* ---------------------------------------------------------- bottom bar */
+.bottombar {
+  display: grid; grid-template-columns: auto 1fr auto auto; gap: 14px; align-items: center;
+  padding: 12px 24px; border-top: 1px solid var(--border); background: #07070f;
+  font-size: 12px; color: var(--dim);
+}
+.mode-pill {
+  padding: 4px 12px; border-radius: 4px; font-weight: 700; letter-spacing: 1.5px; font-size: 11px;
+}
+.mode-pill.dry  { background: rgba(0, 212, 255, 0.12); color: var(--info);   border: 1px solid var(--info); }
+.mode-pill.live { background: rgba(255, 46, 99, 0.12); color: var(--danger); border: 1px solid var(--danger); }
+.bottombar .credits { text-align: right; font-size: 11px; }
+.bottombar select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 5px 10px; border-radius: 4px; font-size: 12px; }
+
+/* ---------------------------------------------------------- responsive */
+@media (max-width: 1100px) {
+  .row-1 { grid-template-columns: 1fr; }
+  .row-2 { grid-template-columns: 1fr; }
+  .topbar { grid-template-columns: 1fr; gap: 8px; text-align: center; }
+  .conn { justify-content: center; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div>
+    <div class="brand">SENTINEL</div>
+    <div class="brand-sub">SURVEILLANCE CONTROL</div>
+  </div>
+  <div class="clock">
+    <div class="time" id="clockTime">--:--:--</div>
+    <div class="date" id="clockDate">----</div>
+  </div>
+  <div class="conn">
+    <span class="uptime" id="uptime">UPTIME 0s</span>
+    <span class="conn-dot" id="connDot"></span>
+    <span id="connLabel">OFFLINE</span>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- ROW 1: VIDEO + STATUS -->
+  <section class="row row-1">
+    <div class="panel" id="videoPanel">
+      <h2>Live Feed</h2>
+      <div class="video-wrap" id="videoWrap">
+        <img id="videoFeed" src="/api/video_feed" alt="Live feed"
+             onerror="document.getElementById('videoWrap').classList.add('disconnected');"
+             onload="document.getElementById('videoWrap').classList.remove('disconnected');">
+        <div class="video-overlay-tl">
+          <span class="rec-dot"></span>
+          <span id="cameraLabel">CAM 0</span>
+        </div>
+        <div class="video-overlay-tr" id="vidFpsWrap"><span id="vidFps">0.0 FPS</span></div>
+        <div class="video-overlay-bl">
+          <span class="video-state-badge state-IDLE" id="videoState">IDLE</span>
+        </div>
+        <div class="disconnected-overlay">FEED DISCONNECTED</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>System Status</h2>
+      <div class="state-text state-IDLE" id="stateText">IDLE</div>
+      <div class="state-duration" id="stateDuration">in state for 0s</div>
+      <div class="divider"></div>
+      <div id="modelsList"></div>
+      <div class="divider"></div>
+      <div class="kv-row"><span class="k">Camera</span><span class="v" id="kvCamIdx">--</span></div>
+      <div class="kv-row"><span class="k">Resolution</span><span class="v" id="kvCamRes">--</span></div>
+      <div class="kv-row"><span class="k">Capture FPS</span><span class="v" id="kvCamFps">--</span></div>
+      <div class="kv-row"><span class="k">Process FPS</span><span class="v" id="kvProcFps">--</span></div>
+      <div class="kv-row"><span class="k">Frames</span><span class="v" id="kvCamFrames">--</span></div>
+    </div>
+  </section>
+
+  <!-- ROW 2: 3 PANELS -->
+  <section class="row row-2">
+    <div class="panel" id="threatPanel">
+      <h2>Threat Detection</h2>
+      <div id="threatList" class="threat-list"></div>
+      <div id="allClear" class="all-clear">ALL CLEAR</div>
+    </div>
+
+    <div class="panel">
+      <h2>Face Authorization</h2>
+      <div class="face-status idle" id="faceStatus">No face in frame</div>
+      <div class="enroll-form">
+        <input type="text" id="enrollName" class="input" placeholder="Person name" />
+        <button class="btn primary" id="btnEnroll">Add Face</button>
+      </div>
+      <div class="enroll-status" id="enrollStatus"></div>
+      <div class="enrolled-list" id="enrolledList"></div>
+    </div>
+
+    <div class="panel" id="alertPanel">
+      <div class="alert-header">
+        <h2 style="margin: 0;">Alert Center</h2>
+        <span class="alert-counter" id="alertCounter">0</span>
+      </div>
+      <div class="alert-list" id="alertList"></div>
+      <div class="alert-controls">
+        <button class="btn" id="btnClearAlerts">Clear Log</button>
+        <button class="btn" id="btnSoundToggle">Sound: OFF</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ROW 3: TIMELINE -->
+  <section class="panel">
+    <h2>State Timeline</h2>
+    <div class="timeline-wrap">
+      <div class="timeline" id="timeline"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="bottombar">
+  <button class="btn danger" id="btnReset">Reset to IDLE</button>
+  <select id="cameraSelect"><option value="0">Camera 0</option></select>
+  <span class="mode-pill dry" id="modePill">DRY RUN</span>
+  <span class="credits">Smart Surveillance v2.0 · MIT-WPU · Rahul Raj, Prince Gupta, Meghna Lal</span>
+</footer>
+
+<script>
+(function () {
+  // ---------------------------------------------------------- state
+  var ws = null;
+  var reconnectDelay = 2000;
+  var systemUptime = 0;
+  var stateEntered = Date.now();
+  var currentState = 'IDLE';
+  var alerts = [];
+  var transitions = [];
+  var soundOn = false;
+  var audioCtx = null;
+  var enrollPoll = null;
+  // detections.suspicious is a unified bucket; we read activity_type to
+  // route to the right priority/colour (loitering vs weapon vs other).
+  var detections = { fire: null, injury: null, suspicious: null, face: null };
+
+  var MAX_ALERTS = 50;
+  var MAX_TIMELINE = 20;
+
+  // Priority levels (matches frame_annotator.py colour palette)
+  var PRIORITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+  function $(id) { return document.getElementById(id); }
+
+  // ---------------------------------------------------------- clock
+  function tickClock() {
+    var d = new Date();
+    var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+    $('clockTime').textContent = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    $('clockDate').textContent = d.toDateString().toUpperCase();
+    $('stateDuration').textContent = 'in state for ' + fmtDuration(Date.now() - stateEntered);
+    if (systemUptime > 0) {
+      $('uptime').textContent = 'UPTIME ' + fmtDuration(systemUptime * 1000);
+    }
+  }
+  setInterval(tickClock, 1000);
+  tickClock();
+
+  function fmtDuration(ms) {
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60); s = s % 60;
+    if (m < 60) return m + 'm ' + s + 's';
+    var h = Math.floor(m / 60); m = m % 60;
+    return h + 'h ' + m + 'm';
+  }
+
+  // ---------------------------------------------------------- websocket
+  function connectWs() {
+    var loc = window.location;
+    var url = (loc.protocol === 'https:' ? 'wss://' : 'ws://') + loc.host + '/ws/telemetry';
+    ws = new WebSocket(url);
+    ws.onopen = function () {
+      reconnectDelay = 2000;
+      $('connDot').classList.add('online');
+      $('connLabel').textContent = 'ONLINE';
+    };
+    ws.onclose = function () {
+      $('connDot').classList.remove('online');
+      $('connLabel').textContent = 'OFFLINE';
+      setTimeout(connectWs, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+    };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+    ws.onmessage = function (e) {
+      try {
+        var msg = JSON.parse(e.data);
+        if (msg.type === 'ping') return;
+        handleEvent(msg);
+      } catch (err) {}
+    };
+  }
+
+  function handleEvent(msg) {
+    var et = msg.event_type || '';
+    switch (et) {
+      case 'STATE_TRANSITION':
+        applyState(msg.to_state || 'IDLE');
+        addTransition(msg);
+        // Reset face status only when returning to IDLE — the auth
+        // session is conceptually still active during COOLDOWN.
+        if (msg.to_state === 'IDLE') {
+          setFaceStatus('idle', 'No face in frame');
+          detections.face = null;
+          updateModelStatus('face', 'OFFLINE');
+        }
+        break;
+
+      case 'AUTH_SUCCESS':
+        var name = (msg.result && (msg.result.user_id || msg.result.name)) || 'AUTHORIZED';
+        var conf = msg.result && msg.result.confidence;
+        setFaceStatus('authorized', 'AUTHORIZED: ' + name + (conf ? ' (' + Math.round(conf * 100) + '%)' : ''));
+        detections.face = { name: name, authorized: true, confidence: conf || 0 };
+        renderThreats();
+        break;
+
+      case 'AUTH_FAILED':
+        setFaceStatus('unauthorized', 'UNAUTHORIZED: Unknown');
+        detections.face = null;
+        break;
+
+      case 'FIRE_DETECTED':
+        detections.fire = msg.result || {};
+        addAlert('fire', 'FIRE: ' + (msg.result && msg.result.severity_level || 'unknown'),
+                 msg.result && msg.result.confidence, msg.timestamp);
+        renderThreats();
+        beep();
+        break;
+
+      case 'INJURY_DETECTED':
+        detections.injury = msg.result || {};
+        addAlert('injury', 'INJURY: ' + (msg.result && msg.result.posture_type || 'unknown'),
+                 msg.result && msg.result.confidence, msg.timestamp);
+        renderThreats();
+        beep();
+        break;
+
+      case 'SUSPICIOUS_ACTIVITY':
+        detections.suspicious = msg.result || {};
+        var act = (msg.result && msg.result.activity_type) || 'unknown';
+        var bucket = (act === 'weapon_like_object') ? 'weapon' : 'suspicious';
+        addAlert(bucket, (bucket === 'weapon' ? 'WEAPON: ' : 'SUSPICIOUS: ') + act,
+                 msg.result && msg.result.confidence, msg.timestamp);
+        renderThreats();
+        beep();
+        break;
+
+      case 'DETECTION_COMPLETE':
+        setTimeout(function () {
+          detections.fire = detections.injury = detections.suspicious = null;
+          renderThreats();
+        }, 2000);
+        break;
+
+      case 'ALERT_DISPATCHED':
+        var t = (msg.alert_type || '').toLowerCase();
+        var k = t.indexOf('fire') >= 0 ? 'fire'
+              : t.indexOf('injury') >= 0 ? 'injury'
+              : t.indexOf('weapon') >= 0 ? 'weapon'
+              : 'suspicious';
+        addAlert(k, 'ALERT: ' + (msg.alert_type || 'UNKNOWN'), null, msg.timestamp);
+        break;
+
+      case 'MODEL_LOADED':
+      case 'MODEL_UNLOADED':
+        if (msg.model_name) {
+          var mk = modelKey(msg.model_name);
+          // When face_model unloads after auth, show AUTHORIZED instead of
+          // OFFLINE so the model panel matches the face-status widget.
+          if (mk === 'face' && et === 'MODEL_UNLOADED' && detections.face && detections.face.authorized) {
+            updateModelStatus(mk, 'AUTHORIZED');
+          } else {
+            updateModelStatus(mk, et === 'MODEL_LOADED' ? 'online' : 'offline');
+          }
+        }
+        break;
+    }
+  }
+
+  function modelKey(className) {
+    var m = (className || '').replace('Model', '').toLowerCase();
+    return m;
+  }
+
+  // ---------------------------------------------------------- state changes
+  function applyState(name) {
+    if (name === currentState) return;
+    currentState = name;
+    stateEntered = Date.now();
+
+    var st = $('stateText');
+    st.textContent = name;
+    st.className = 'state-text state-' + name;
+
+    var vs = $('videoState');
+    vs.textContent = name;
+    vs.className = 'video-state-badge state-' + name;
+
+    var vw = $('videoWrap');
+    vw.classList.remove('active');
+    if (name === 'ACTIVE_DETECTION') vw.classList.add('active');
+
+    var tp = $('threatPanel');
+    tp.classList.remove('glow-danger');
+    if (name === 'ACTIVE_DETECTION') tp.classList.add('glow-danger');
+  }
+
+  // ---------------------------------------------------------- face status
+  function setFaceStatus(kind, text) {
+    var el = $('faceStatus');
+    el.className = 'face-status ' + kind;
+    el.textContent = text;
+  }
+
+  // ---------------------------------------------------------- threats with priority
+  function detectionPriority(det) {
+    if (det.kind === 'fire')      return 'CRITICAL';
+    if (det.kind === 'injury')    return 'HIGH';
+    if (det.kind === 'weapon')    return 'HIGH';
+    if (det.kind === 'face')      return 'LOW';
+    // default for suspicious / loitering / masked_face
+    return 'MEDIUM';
+  }
+
+  function detectionsList() {
+    var out = [];
+    if (detections.fire) {
+      out.push({ kind: 'fire', icon: '🔥', label: 'FIRE',
+                 sub: detections.fire.severity_level || 'unknown',
+                 confidence: detections.fire.confidence,
+                 ratio: severityRatio(detections.fire) });
+    }
+    if (detections.injury) {
+      out.push({ kind: 'injury', icon: '!', label: 'INJURY',
+                 sub: detections.injury.posture_type || 'unknown',
+                 confidence: detections.injury.confidence,
+                 ratio: confRatio(detections.injury) });
+    }
+    if (detections.suspicious) {
+      var act = detections.suspicious.activity_type || 'unknown';
+      var weapon = act === 'weapon_like_object';
+      out.push({
+        kind: weapon ? 'weapon' : 'suspicious',
+        icon: weapon ? '⚔' : '?',
+        label: weapon ? 'WEAPON' : 'SUSPICIOUS',
+        sub: act,
+        confidence: detections.suspicious.confidence,
+        ratio: confRatio(detections.suspicious),
+      });
+    }
+    if (detections.face && detections.face.authorized) {
+      out.push({ kind: 'face', icon: '✓', label: 'FACE',
+                 sub: detections.face.name,
+                 confidence: detections.face.confidence,
+                 ratio: confRatio(detections.face) });
+    }
+
+    out.forEach(function (d) { d.priority = detectionPriority(d); });
+    out.sort(function (a, b) { return PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]; });
+    return out;
+  }
+
+  function renderThreats() {
+    var list = $('threatList');
+    list.innerHTML = '';
+
+    var items = detectionsList();
+    if (items.length === 0) {
+      $('allClear').style.display = 'block';
+      return;
+    }
+    $('allClear').style.display = 'none';
+
+    items.forEach(function (d, idx) {
+      list.appendChild(threatItem(d, idx === 0));
+    });
+  }
+
+  function severityRatio(r) {
+    var s = (r.severity_level || '').toLowerCase();
+    if (s === 'high' || s === 'critical' || s === 'uncontrollable') return 1.0;
+    if (s === 'medium' || s === 'hazardous') return 0.66;
+    if (s === 'controllable') return 0.5;
+    if (s === 'low' || s === 'small') return 0.33;
+    return 0.5;
+  }
+  function confRatio(r) {
+    var c = r.confidence;
+    if (typeof c !== 'number') return 0.5;
+    if (c > 1.0) c = c / 100.0;
+    return Math.max(0, Math.min(1, c));
+  }
+  function confPct(c) {
+    if (typeof c !== 'number' || c <= 0) return null;
+    if (c <= 1) c = c * 100;
+    return Math.round(Math.min(99, c));
+  }
+
+  var COLOR_FOR_KIND = {
+    fire:       'var(--c-fire)',
+    injury:     'var(--c-injury)',
+    weapon:     'var(--c-weapon)',
+    suspicious: 'var(--c-suspicious)',
+    face:       'var(--c-pose)',
+  };
+
+  function threatItem(d, primary) {
+    var div = document.createElement('div');
+    div.className = 'threat-item priority-' + d.priority + (primary ? ' primary' : '');
+    var conf = confPct(d.confidence);
+    var labelText = d.label + (conf !== null ? ' ' + conf + '%' : '');
+    div.innerHTML =
+      '<span class="threat-icon">' + d.icon + '</span>' +
+      '<div class="threat-meta">' +
+        '<div class="label"><span class="pri-tag">' + d.priority + '</span>' + escape(labelText) + '</div>' +
+        '<div class="sub">' + escape(d.sub) + '</div>' +
+      '</div>' +
+      '<div class="severity-bar"><div style="width:' + Math.round(d.ratio * 100) + '%;background:' + COLOR_FOR_KIND[d.kind] + ';"></div></div>';
+    return div;
+  }
+
+  // ---------------------------------------------------------- alerts
+  function addAlert(kind, desc, conf, ts) {
+    var pct = confPct(conf);
+    if (pct !== null) desc = desc + ' (' + pct + '%)';
+    alerts.unshift({ kind: kind, desc: desc, ts: ts || (Date.now() / 1000) });
+    if (alerts.length > MAX_ALERTS) alerts.pop();
+    renderAlerts();
+  }
+
+  function renderAlerts() {
+    $('alertCounter').textContent = alerts.length;
+    var list = $('alertList');
+    list.innerHTML = '';
+    alerts.forEach(function (a) {
+      var d = new Date(a.ts * 1000);
+      var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+      var ts = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+      var icon = '⚠';
+      if (a.kind === 'fire') icon = '🔥';
+      else if (a.kind === 'injury') icon = '!';
+      else if (a.kind === 'weapon') icon = '⚔';
+      var row = document.createElement('div');
+      row.className = 'alert-row ' + (a.kind || '');
+      row.innerHTML =
+        '<span class="icon">' + icon + '</span>' +
+        '<span class="desc">' + escape(a.desc) + '</span>' +
+        '<span class="ts">' + ts + '</span>';
+      list.appendChild(row);
+    });
+  }
+
+  $('btnClearAlerts').onclick = function () { alerts = []; renderAlerts(); };
+  $('btnSoundToggle').onclick = function () {
+    soundOn = !soundOn;
+    $('btnSoundToggle').textContent = 'Sound: ' + (soundOn ? 'ON' : 'OFF');
+    if (soundOn && !audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    }
+  };
+
+  function beep() {
+    if (!soundOn || !audioCtx) return;
+    try {
+      var osc = audioCtx.createOscillator();
+      var gain = audioCtx.createGain();
+      osc.frequency.value = 800;
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.001, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.15, audioCtx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.22);
+    } catch (e) {}
+  }
+
+  // ---------------------------------------------------------- timeline
+  function addTransition(msg) {
+    var prev = transitions[transitions.length - 1];
+    var dur = prev ? ((msg.timestamp || (Date.now() / 1000)) - prev.ts) : 0;
+    if (prev) prev.dur = dur;
+    transitions.push({
+      from: msg.from_state, to: msg.to_state, ts: msg.timestamp || (Date.now() / 1000), dur: 0
+    });
+    if (transitions.length > MAX_TIMELINE) transitions.shift();
+    renderTimeline();
+  }
+
+  function renderTimeline() {
+    var tl = $('timeline');
+    tl.innerHTML = '';
+    transitions.forEach(function (t, i) {
+      var n = document.createElement('div');
+      n.className = 'tl-node tl-' + (t.to || 'IDLE');
+      n.innerHTML = '<div class="tl-state">' + (t.to || '') + '</div>' +
+                    '<div class="tl-dur">' + t.dur.toFixed(1) + 's</div>';
+      tl.appendChild(n);
+      if (i < transitions.length - 1) {
+        var a = document.createElement('span');
+        a.className = 'tl-arrow';
+        a.textContent = '→';
+        tl.appendChild(a);
+      }
+    });
+    var wrap = tl.parentNode;
+    if (wrap) wrap.scrollLeft = tl.scrollWidth;
+  }
+
+  // ---------------------------------------------------------- model status
+  function updateModelStatus(key, status) {
+    var dot = document.querySelector('[data-model="' + key + '"] .model-dot');
+    var lbl = document.querySelector('[data-model="' + key + '"] .model-status');
+    if (!dot || !lbl) return;
+    dot.classList.remove('online', 'ready', 'active', 'authorized', 'alert', 'error');
+    lbl.classList.remove('online', 'ready', 'active', 'authorized', 'alert', 'error');
+    var upper = (status || '').toUpperCase();
+    if (upper === 'ALERT') {
+      dot.classList.add('alert'); lbl.classList.add('alert');
+      lbl.textContent = 'ALERT';
+    } else if (upper === 'AUTHORIZED') {
+      dot.classList.add('authorized'); lbl.classList.add('authorized');
+      lbl.textContent = 'AUTHORIZED';
+    } else if (upper === 'ACTIVE') {
+      dot.classList.add('active'); lbl.classList.add('active');
+      lbl.textContent = 'ACTIVE';
+    } else if (upper === 'READY' || upper === 'LOADING') {
+      dot.classList.add('ready'); lbl.classList.add('ready');
+      lbl.textContent = upper;
+    } else if (upper === 'ONLINE' || upper === 'LOADED') {
+      dot.classList.add('online'); lbl.classList.add('online');
+      lbl.textContent = 'ONLINE';
+    } else if (upper === 'ERROR') {
+      dot.classList.add('error'); lbl.classList.add('error');
+      lbl.textContent = 'ERROR';
+    } else {
+      lbl.textContent = 'OFFLINE';
+    }
+  }
+
+  function renderModelList(models) {
+    var ml = $('modelsList');
+    ml.innerHTML = '';
+    var statusMap = {
+      'ALERT': { css: 'alert', label: 'ALERT' },
+      'AUTHORIZED': { css: 'authorized', label: 'AUTHORIZED' },
+      'ACTIVE': { css: 'active', label: 'ACTIVE' },
+      'READY': { css: 'ready', label: 'READY' },
+      'LOADING': { css: 'ready', label: 'LOADING' },
+      'loaded': { css: 'online', label: 'ONLINE' },
+      'ONLINE': { css: 'online', label: 'ONLINE' },
+    };
+    Object.keys(models).forEach(function (name) {
+      var st = models[name];
+      var info = statusMap[st] || { css: '', label: 'OFFLINE' };
+      var row = document.createElement('div');
+      row.className = 'model-row';
+      row.dataset.model = name;
+      row.innerHTML = '<div class="left">' +
+        '<span class="model-dot ' + info.css + '"></span>' +
+        '<span>' + name + '</span></div>' +
+        '<span class="model-status ' + info.css + '">' + info.label + '</span>';
+      ml.appendChild(row);
+    });
+  }
+
+  // ---------------------------------------------------------- enrollment
+  $('btnEnroll').onclick = function () {
+    var name = $('enrollName').value.trim();
+    if (!name) { showEnroll('error', 'Enter a name first'); return; }
+    showEnroll('info', 'Starting capture for ' + name + '...');
+    $('btnEnroll').disabled = true;
+
+    fetch('/api/enroll/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    })
+    .then(function (r) {
+      if (!r.ok) return r.json().then(function (j) { throw new Error(j.detail || 'failed'); });
+      return r.json();
+    })
+    .then(function (data) {
+      pollEnroll(data.session_id);
+    })
+    .catch(function (err) {
+      showEnroll('error', err.message || 'enrollment failed');
+      $('btnEnroll').disabled = false;
+    });
+  };
+
+  function pollEnroll(sid) {
+    if (enrollPoll) clearInterval(enrollPoll);
+    enrollPoll = setInterval(function () {
+      fetch('/api/enroll/status/' + sid).then(function (r) { return r.json(); }).then(function (s) {
+        if (s.status === 'capturing') {
+          showEnroll('info', 'Capturing ' + s.progress + '/' + s.total + '...');
+        } else if (s.status === 'complete') {
+          showEnroll('success', 'Enrolled — ' + s.samples + ' samples');
+          clearInterval(enrollPoll); enrollPoll = null;
+          $('btnEnroll').disabled = false;
+          $('enrollName').value = '';
+          loadEnrolled();
+        } else if (s.status === 'failed') {
+          showEnroll('error', 'Capture failed: ' + (s.reason || 'unknown'));
+          clearInterval(enrollPoll); enrollPoll = null;
+          $('btnEnroll').disabled = false;
+        }
+      }).catch(function () {});
+    }, 700);
+  }
+
+  function showEnroll(kind, msg) {
+    var s = $('enrollStatus');
+    s.className = 'enroll-status show ' + kind;
+    s.textContent = msg;
+  }
+
+  function loadEnrolled() {
+    fetch('/api/enroll/list').then(function (r) { return r.json(); }).then(function (list) {
+      var el = $('enrolledList');
+      el.innerHTML = '';
+      if (!list.length) {
+        el.innerHTML = '<div class="enrolled-row" style="color:var(--dim);">No faces enrolled</div>';
+        return;
+      }
+      list.forEach(function (p) {
+        var row = document.createElement('div');
+        row.className = 'enrolled-row';
+        row.innerHTML = '<div>' + escape(p.name) + ' <span class="samples">' + p.samples + ' samples</span></div>' +
+                        '<button class="btn danger" data-name="' + escape(p.name) + '">Remove</button>';
+        row.querySelector('button').onclick = function () { removeEnroll(p.name); };
+        el.appendChild(row);
+      });
+    }).catch(function () {});
+  }
+
+  function removeEnroll(name) {
+    if (!confirm('Remove ' + name + '?')) return;
+    fetch('/api/enroll/' + encodeURIComponent(name), { method: 'DELETE' })
+      .then(function () { loadEnrolled(); })
+      .catch(function () {});
+  }
+
+  // ---------------------------------------------------------- bottom controls
+  var resetClicks = 0;
+  $('btnReset').onclick = function () {
+    resetClicks++;
+    if (resetClicks === 1) {
+      $('btnReset').textContent = 'Confirm Reset';
+      setTimeout(function () { resetClicks = 0; $('btnReset').textContent = 'Reset to IDLE'; }, 3000);
+      return;
+    }
+    fetch('/api/override', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'reset_to_idle' }),
+    }).then(function () {
+      $('btnReset').textContent = 'Reset to IDLE';
+      resetClicks = 0;
+    }).catch(function () {});
+  };
+
+  // ---------------------------------------------------------- status polling
+  function pollStatus() {
+    fetch('/api/status').then(function (r) { return r.json(); }).then(function (data) {
+      applyState(data.state);
+
+      var procFps = (typeof data.processing_fps === 'number') ? data.processing_fps : 0;
+      var lowFps = procFps > 0 && procFps < 15;
+      $('vidFps').textContent = procFps.toFixed(1) + ' FPS';
+      $('vidFpsWrap').classList.toggle('lowfps', lowFps);
+
+      $('cameraLabel').textContent = 'CAM ' + data.camera.index;
+      $('kvCamIdx').textContent = data.camera.index;
+      $('kvCamRes').textContent = (data.camera.resolution && data.camera.resolution[0]) ?
+        (data.camera.resolution[0] + 'x' + data.camera.resolution[1]) : '--';
+      $('kvCamFps').textContent = (data.camera.fps || 0).toFixed(1);
+      $('kvProcFps').textContent = procFps.toFixed(1);
+      $('kvCamFrames').textContent = data.camera.frame_count;
+      systemUptime = data.uptime_seconds;
+      renderModelList(data.models || {});
+
+      var pill = $('modePill');
+      var dry = !!(data.config && data.config.alerts_dry_run);
+      pill.className = 'mode-pill ' + (dry ? 'dry' : 'live');
+      pill.textContent = dry ? 'DRY RUN' : 'LIVE';
+    }).catch(function () {});
+  }
+
+  // ---------------------------------------------------------- bootstrap data
+  function loadInitial() {
+    fetch('/api/transitions?limit=20').then(function (r) { return r.json(); }).then(function (rows) {
+      if (Array.isArray(rows)) {
+        rows.reverse().forEach(function (r) {
+          transitions.push({
+            from: r.from_state, to: r.to_state, ts: r.timestamp || 0, dur: 0,
+          });
+        });
+        for (var i = 0; i < transitions.length - 1; i++) {
+          transitions[i].dur = transitions[i + 1].ts - transitions[i].ts;
+        }
+        renderTimeline();
+      }
+    }).catch(function () {});
+
+    var types = ['FIRE_DETECTED', 'INJURY_DETECTED', 'SUSPICIOUS_ACTIVITY', 'ALERT_DISPATCHED'];
+    types.forEach(function (t) {
+      fetch('/api/events?type=' + t + '&limit=10').then(function (r) { return r.json(); }).then(function (rows) {
+        if (!Array.isArray(rows)) return;
+        rows.forEach(function (r) {
+          var k = t.toLowerCase().split('_')[0];
+          alerts.push({ kind: k, desc: t.replace('_', ' '), ts: r.timestamp || 0 });
+        });
+        alerts.sort(function (a, b) { return b.ts - a.ts; });
+        if (alerts.length > MAX_ALERTS) alerts = alerts.slice(0, MAX_ALERTS);
+        renderAlerts();
+      }).catch(function () {});
+    });
+  }
+
+  function escape(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // ---------------------------------------------------------- start
+  connectWs();
+  pollStatus();
+  loadInitial();
+  loadEnrolled();
+  renderThreats();
+  setFaceStatus('idle', 'No face in frame');
+  setInterval(pollStatus, 5000);
+  setInterval(loadEnrolled, 15000);
+})();
+</script>
+</body>
+</html>

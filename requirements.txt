@@ -1,0 +1,11 @@
+opencv-python
+mediapipe
+numpy
+pyyaml
+fastapi
+uvicorn
+websockets
+httpx
+psutil
+insightface
+onnxruntime

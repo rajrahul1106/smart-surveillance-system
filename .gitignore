@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables (NEVER commit secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.log
+
+# Docker volumes (data must not be in git)
+postgres_data/
+redis_data/
+
+# Model weights (too large for git, downloaded by scripts/seed_models.py)
+*.pt
+*.pth
+*.onnx
+*.h5
+*.weights
+models_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Uploaded images and annotated outputs (runtime data)
+uploads/
+annotated/
+
+# Coverage reports
+.coverage
+htmlcov/
+coverage.xml
+
+# Alembic - keep versions/ but ignore generated stamps
+alembic/versions/__pycache__/
+data/near_miss_dataset/
+runs/
+data/fire_dataset/
+data/near_miss_dataset/
+data/known_faces/
+data/model_artifacts/
+runs/
+*.zip
+*.npy
+*.task
+*.onnx
+*.pkl
+data/fire_dataset/
+data/near_miss_dataset/
+data/known_faces/
+data/model_artifacts/
+runs/
+*.zip
+*.npy
+*.task
+*.onnx
+*.pkl

@@ -1,0 +1,52 @@
+camera:
+  index: 0
+  width: 640
+  height: 480
+  fps: 30
+
+gesture:
+  confidence_threshold: 0.90
+  near_miss_threshold: 0.60
+  sequence: ["palm", "fist", "palm", "fist"]
+  sequence_timeout_seconds: 5.0
+
+face_auth:
+  max_attempts: 3
+  attempt_timeout_seconds: 10
+  encodings_path: "data/face_encodings.pkl"
+
+fire:
+  model_path: "data/model_artifacts/models/fire_yolov8n.onnx"
+  confidence_threshold: 0.35
+  iou_threshold: 0.45
+  input_size: 416
+  score_threshold: 3.0
+  score_cap: 10.0
+
+detection:
+  active_timeout_seconds: 30
+  cooldown_seconds: 5
+  loitering_threshold_seconds: 30.0
+  loitering_movement_pixels: 20.0
+
+alerts:
+  dry_run: true
+  webhook_url: ""
+  twilio_enabled: false
+  twilio_account_sid: ""
+  twilio_auth_token: ""
+  twilio_from_number: ""
+  twilio_to_number: ""
+  rate_limit_seconds: 60
+  log_path: "data/alerts.log"
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_path: "data/app.log"
+
+frame:
+  skip_rate_idle: 3
+  skip_rate_active: 1
+  gesture_resolution: [320, 240]
+  detection_resolution: [640, 480]
