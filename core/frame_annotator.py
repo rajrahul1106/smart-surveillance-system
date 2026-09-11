@@ -304,6 +304,14 @@ class FrameAnnotator:
                 if origin is not None:
                     self._safe_label(out, label, origin, text_color, box_color,
                                      scale=_SCALE_LABEL, placed=placed)
+            elif sus_bbox is None and _meets_threshold(activity_lower, conf):
+                # Whole-frame classifiers (ActivityModel) report no bbox:
+                # draw the label alone, centred near the top of the frame.
+                label = f"{activity}" + (f" {conf}%" if conf is not None else "")
+                w_label, _, _ = _label_size(label, _SCALE_LABEL, 5)
+                self._safe_label(out, label, ((out_w - w_label) // 2, 50),
+                                 text_color, box_color,
+                                 scale=_SCALE_LABEL, placed=placed)
 
         # ------------------------------------------------------------------
         # Gesture label (top-center during VERIFYING_GESTURE)

@@ -23,6 +23,13 @@ fire:
   score_threshold: 3.0
   score_cap: 10.0
 
+activity:
+  model_path: "data/model_artifacts/models/sentinel_activity_mnv3.onnx"
+  label_map_path: "data/model_artifacts/models/activity_label_map.json"
+  confidence_threshold: 0.60
+  score_threshold: 3.0
+  score_cap: 10.0
+
 detection:
   active_timeout_seconds: 30
   cooldown_seconds: 5

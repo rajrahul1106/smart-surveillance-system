@@ -19,7 +19,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | **IDLE** | Monitors for SOS gesture only. All detection models offline. Minimal CPU usage. |
 | **VERIFYING_GESTURE** | Validates 4-step Palm→Fist→Palm→Fist sequence at 99% confidence per gesture. |
 | **VERIFYING_IDENTITY** | ArcFace face authentication against enrolled identities. 3 attempt limit. |
-| **ACTIVE_DETECTION** | Fire (YOLOv11n), injury (MediaPipe Pose), and activity (HOG+SVM) detection run in parallel. |
+| **ACTIVE_DETECTION** | Fire (YOLOv11n), injury (MediaPipe Pose), and activity (MobileNetV3-Small) detection run in parallel. |
 | **COOLDOWN** | Unloads all models, clears state, prepares for next cycle. |
 
 ---
@@ -30,11 +30,11 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 - **Face Authentication** — InsightFace ArcFace (buffalo_l) with cosine similarity matching against enrolled identities
 - **Fire Detection** — YOLOv11n ONNX model trained on 10,000+ fire/smoke images with leaky-accumulator temporal verification
 - **Injury Detection** — MediaPipe Pose estimation for fallen/collapsed person detection
-- **Activity Monitoring** — HOG+SVM for suspicious activity classification
+- **Activity Monitoring** — MobileNetV3-Small ONNX classifier (normal / robbery / violence) with leaky-accumulator temporal verification
 - **Live Dashboard** — Cyberpunk-themed SENTINEL web dashboard with real-time MJPEG video, state telemetry, model status, and alert history via WebSocket
 - **Long-Range Detection** — Gesture recognition at 2-3m using center-crop upscaling (1.67x digital zoom)
 - **State-Driven Architecture** — Event-bus pattern with per-state model loading/unloading. No if/elif chains.
-- **184 Passing Tests** — Comprehensive test coverage across all models and pipeline states
+- **185 Passing Tests** — Comprehensive test coverage across all models and pipeline states
 
 ---
 
@@ -46,7 +46,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | Fire mAP@50 | 65.9% |
 | Detection Range | 2–3 meters |
 | Auth Latency | < 2 seconds |
-| Test Suite | 184 passing |
+| Test Suite | 185 passing |
 | Fire Training Images | 10,000+ |
 
 ---
@@ -60,7 +60,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | **Face Auth** | InsightFace ArcFace (buffalo_l), ONNX Runtime |
 | **Fire Detection** | YOLOv11n, ONNX Runtime, trained on Roboflow datasets |
 | **Injury** | MediaPipe Pose Estimation |
-| **Activity** | HOG + SVM |
+| **Activity** | MobileNetV3-Small, ONNX Runtime |
 | **API** | FastAPI, WebSocket, MJPEG streaming |
 | **Dashboard** | HTML/CSS/JS (cyberpunk theme) |
 | **Database** | SQLite |
@@ -95,7 +95,7 @@ smart_surveillance/
 │   ├── face_model.py                # InsightFace ArcFace recognition
 │   ├── fire_model.py                # YOLOv11n ONNX fire/smoke detection
 │   ├── injury_model.py              # MediaPipe pose injury detection
-│   └── activity_model.py            # HOG+SVM activity monitoring
+│   └── activity_model.py            # MobileNetV3-Small ONNX activity classifier
 ├── services/
 │   ├── alert_service.py             # Alert dispatching (DRY RUN / live)
 │   ├── storage_service.py           # SQLite persistence
@@ -110,12 +110,14 @@ smart_surveillance/
 ├── data/
 │   └── model_artifacts/
 │       └── models/
-│           ├── buffalo_l/           # InsightFace ArcFace models
-│           └── fire_yolov8n.onnx    # YOLOv11n fire detection model
+│           ├── buffalo_l/                    # InsightFace ArcFace models
+│           ├── fire_yolov8n.onnx             # YOLOv11n fire detection model
+│           ├── sentinel_activity_mnv3.onnx   # MobileNetV3-Small activity classifier
+│           └── activity_label_map.json       # Activity classes + preprocessing
 ├── scripts/
 │   └── train_fire_model.py          # One-time fire model training script
 └── tests/
-    └── test_models.py               # 184 tests
+    └── test_models.py               # 185 tests
 ```
 
 ---
@@ -162,6 +164,15 @@ python scripts/train_fire_model.py
 # Option B: Use the pre-trained model included in the repo
 # data/model_artifacts/models/fire_yolov8n.onnx is already included
 ```
+
+**Activity Classification (MobileNetV3-Small):**
+
+Place both files in `data/model_artifacts/models/` before running — they are gitignored, so a fresh clone does not include them:
+
+- `sentinel_activity_mnv3.onnx` — ONNX classifier (~6 MB)
+- `activity_label_map.json` — class names and preprocessing settings
+
+If the ONNX file is missing, activity detection is disabled (an error is logged) and the rest of the system still runs.
 
 ### Face Enrollment
 
@@ -212,7 +223,7 @@ Open the dashboard: **http://localhost:8000/dashboard**
 pytest tests/ -v
 ```
 
-All 184 tests should pass.
+All 185 tests should pass.
 
 ---
 
