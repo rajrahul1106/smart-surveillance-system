@@ -27,6 +27,7 @@ from core.events import (
     GestureCandidate,
     GestureConfirmed,
     ModelLoaded,
+    PresenceUpdated,
     ProcessedFrame,
     StateTransition,
     SystemStartup,
@@ -407,6 +408,26 @@ class TestAuditLogger:
         transitions = storage.query_transitions()
         assert len(transitions) == 1
         assert transitions[0]["from_state"] == "IDLE"
+
+    def test_logs_presence_updated(self, storage):
+        bus = EventBus()
+        al = AuditLogger(bus, storage)
+        al.start()
+
+        bus.publish(PresenceUpdated(
+            authorized=["Rahul Raj"], unknown_count=1, uncertain_count=0, total=2,
+        ))
+        bus.flush()
+
+        al.stop()
+
+        rows = storage.query_events(event_type="PRESENCE_UPDATED")
+        assert len(rows) == 1
+        payload = json.loads(rows[0]["payload"])
+        assert payload["authorized"] == ["Rahul Raj"]
+        assert payload["unknown_count"] == 1
+        assert payload["uncertain_count"] == 0
+        assert payload["total"] == 2
 
     def test_stop_unsubscribes(self, storage):
         bus = EventBus()

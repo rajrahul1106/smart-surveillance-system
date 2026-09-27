@@ -221,6 +221,21 @@ camera:
         with pytest.raises(ValueError, match="detection.cooldown_seconds"):
             cfg.validate()
 
+    def test_unknown_threshold_above_auth_threshold(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(auth_threshold=0.5, unknown_threshold=0.6))
+        with pytest.raises(ValueError, match="face_auth thresholds"):
+            cfg.validate()
+
+    def test_ema_alpha_zero(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(ema_alpha=0.0))
+        with pytest.raises(ValueError, match="face_auth.ema_alpha"):
+            cfg.validate()
+
+    def test_presence_interval_zero(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(presence_interval_frames=0))
+        with pytest.raises(ValueError, match="face_auth.presence_interval_frames"):
+            cfg.validate()
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -237,6 +252,28 @@ class TestDefaults:
     def test_alerts_config_dry_run_defaults_true(self):
         cfg = AlertsConfig()
         assert cfg.dry_run is True
+
+    def test_face_auth_defaults_match_face_model_constants(self):
+        from models.face_model import FaceModel
+
+        cfg = FaceAuthConfig()
+        assert cfg.auth_threshold == FaceModel.AUTHORIZE_THRESHOLD
+        assert cfg.unknown_threshold == FaceModel.UNKNOWN_THRESHOLD
+        assert cfg.ema_alpha == FaceModel.EMA_ALPHA
+        assert cfg.unknown_confirm_frames == FaceModel.UNKNOWN_CONFIRM_FRAMES
+        assert cfg.track_max_missed == FaceModel.TRACK_MAX_MISSED
+        assert cfg.max_faces == FaceModel.MAX_FACES
+        assert cfg.presence_interval_frames == 10
+
+    def test_repo_config_loads_multi_person_face_keys(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.face_auth.auth_threshold == 0.60
+        assert cfg.face_auth.unknown_threshold == 0.30
+        assert cfg.face_auth.ema_alpha == 0.3
+        assert cfg.face_auth.unknown_confirm_frames == 5
+        assert cfg.face_auth.track_max_missed == 10
+        assert cfg.face_auth.presence_interval_frames == 10
+        assert cfg.face_auth.max_faces == 6
 
     def test_app_config_all_sections_populated(self):
         cfg = AppConfig()

@@ -80,3 +80,4 @@ runs/
 *.task
 *.onnx
 *.pkl
+data/events.db

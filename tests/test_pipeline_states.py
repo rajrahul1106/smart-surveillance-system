@@ -6,8 +6,9 @@ import sys
 import os
 import time
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +26,7 @@ from core.events import (
     GestureNearMiss,
     GestureRejected,
     InjuryDetected,
+    PresenceUpdated,
     ProcessedFrame,
     SuspiciousActivity,
 )
@@ -36,6 +38,7 @@ from core.states.verifying_identity_state import VerifyingIdentityState
 from core.states.active_detection_state import ActiveDetectionState
 from core.states.cooldown_state import CooldownState
 from core.pipeline import Pipeline
+from models.face_model import FaceModel
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +70,42 @@ def _make_context(**overrides):
 def _publish_frame(event_bus: EventBus, frame: str = "frame_data", camera_id: str = "") -> None:
     event_bus.publish(ProcessedFrame(frame=frame, camera_id=camera_id))
     event_bus.flush()
+
+
+_ENROLLED = np.ones(512, dtype=np.float32) / np.sqrt(512)
+# Orthogonal to _ENROLLED (cosine similarity 0): a stranger.
+_STRANGER = np.array([1.0, -1.0] * 256, dtype=np.float32) / np.sqrt(512)
+
+
+def _insightface_modules(faces):
+    """sys.modules entries that make FaceModel.load() use a fake insightface app."""
+    app = MagicMock()
+    app.get.return_value = list(faces)
+    package = MagicMock()
+    package.app.FaceAnalysis.return_value = app
+    return {"insightface": package, "insightface.app": package.app}
+
+
+def _insightface_face(bbox, embedding):
+    face = MagicMock()
+    face.bbox = np.asarray(bbox, dtype=np.float32)
+    face.normed_embedding = np.asarray(embedding, dtype=np.float32)
+    return face
+
+
+def _tracked_face(track_id=1, status="UNKNOWN", identity=None, confidence=5.0, auth_streak=0):
+    """One entry of FaceModel's ``faces`` list."""
+    return {
+        "track_id": track_id, "bbox": (10 + 60 * track_id, 10, 50, 50),
+        "status": status, "identity": identity,
+        "confidence": confidence, "auth_streak": auth_streak,
+    }
+
+
+def _drain_face_worker(state):
+    """Wait for the presence run the last on_frame started (it runs on a worker thread)."""
+    if state._face_future is not None:
+        state._face_future.result(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +172,29 @@ class TestIdleState:
         ctx["fire_model"].unload.assert_called_once()
         ctx["injury_model"].unload.assert_called_once()
         ctx["activity_model"].unload.assert_called_once()
+
+    def test_skips_frames_until_gesture_model_is_loaded(self):
+        # COOLDOWN -> IDLE runs on a timer thread, so a frame can arrive
+        # while IdleState.on_enter is still loading the gesture model.
+        ctx = _make_context()
+        ctx["gesture_model"].is_loaded = False
+        state = IdleState(ctx)
+
+        assert state.on_frame("frame_data", ctx) is None
+        ctx["gesture_model"].predict.assert_not_called()
+
+    def test_on_enter_clears_presence_session(self):
+        ctx = _make_context()
+        ctx["last_presence"] = (("Rahul Raj",), 0, 0, 1)
+        ctx["last_detections"] = {
+            "faces": [_tracked_face()], "presence": {"total": 1},
+            "authenticated_user": "Rahul Raj", "authenticated_users": ["Rahul Raj"],
+        }
+        IdleState(ctx).on_enter(ctx)
+
+        assert "last_presence" not in ctx
+        for key in ("faces", "presence", "authenticated_user", "authenticated_users"):
+            assert key not in ctx["last_detections"]
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +324,90 @@ class TestVerifyingIdentityState:
         state.on_exit(ctx)
         ctx["face_model"].unload.assert_called_once()
 
+    def test_on_enter_uses_verify_mode(self):
+        ctx = _make_context()
+        VerifyingIdentityState(ctx).on_enter(ctx)
+        ctx["face_model"].set_mode.assert_called_once_with("verify")
+
+    def test_auth_succeeds_with_enrolled_and_unknown_face_in_frame(self):
+        faces = [
+            _insightface_face((200, 150, 300, 270), _ENROLLED),  # the gesture-doer
+            _insightface_face((20, 150, 120, 270), _STRANGER),   # a bystander
+        ]
+        face_model = FaceModel(encodings_path="/nonexistent/enc.pkl")
+        ctx = _make_context(face_model=face_model)
+        state = VerifyingIdentityState(ctx)
+        with patch.dict("sys.modules", _insightface_modules(faces)):
+            state.on_enter(ctx)
+        face_model.add_encoding("Rahul Raj", _ENROLLED)
+
+        published = []
+        ctx["event_bus"].subscribe(EventType.AUTH_SUCCESS, published.append)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        # Frames 1-2 build the AUTHORIZED streak; they aren't failed attempts.
+        triggers = [state.on_frame(frame, ctx) for _ in range(3)]
+        ctx["event_bus"].flush()
+
+        assert triggers == [None, None, "auth_success"]
+        assert len(published) == 1
+        assert published[0].result["user_id"] == "Rahul Raj"
+        assert published[0].result["authenticated_users"] == ["Rahul Raj"]
+        session = ctx["last_detections"]
+        assert session["face_authorized"] is True
+        assert session["authenticated_user"] == "Rahul Raj"
+        assert sorted(f["status"] for f in session["faces"]) == ["AUTHORIZED", "UNCERTAIN"]
+        face_model.unload()
+
+    def test_confirmation_frames_do_not_use_up_attempts(self):
+        ctx = _make_context(config=PipelineConfig(face_auth=FaceAuthConfig(max_attempts=1)))
+        state = VerifyingIdentityState(ctx)
+        state.on_enter(ctx)
+
+        triggers = []
+        for streak in (1, 2, 3):
+            face = _tracked_face(status="AUTHORIZED", identity="Rahul Raj",
+                                 confidence=91.0, auth_streak=streak)
+            ctx["face_model"].predict.return_value = {
+                "is_authorized": True, "is_live": True, "faces": [face],
+            }
+            triggers.append(state.on_frame("frame", ctx))
+        assert triggers == [None, None, "auth_success"]
+
+    def test_primary_user_is_highest_confidence_and_all_names_recorded(self):
+        ctx = _make_context()
+        state = VerifyingIdentityState(ctx)
+        state.on_enter(ctx)
+        published = []
+        ctx["event_bus"].subscribe(EventType.AUTH_SUCCESS, published.append)
+
+        ctx["face_model"].predict.return_value = {
+            "is_authorized": True, "is_live": True,
+            "faces": [
+                _tracked_face(1, "AUTHORIZED", "Meghna Lal", 74.0, auth_streak=3),
+                _tracked_face(2, "AUTHORIZED", "Rahul Raj", 88.0, auth_streak=3),
+                _tracked_face(3, "UNKNOWN"),
+            ],
+        }
+        assert state.on_frame("frame", ctx) == "auth_success"
+        ctx["event_bus"].flush()
+
+        assert published[0].result["user_id"] == "Rahul Raj"
+        assert published[0].result["confidence"] == pytest.approx(0.88)
+        assert ctx["last_detections"]["authenticated_user"] == "Rahul Raj"
+        assert ctx["last_detections"]["authenticated_users"] == ["Meghna Lal", "Rahul Raj"]
+
+    def test_unknown_faces_count_as_failed_attempts(self):
+        ctx = _make_context(config=PipelineConfig(face_auth=FaceAuthConfig(max_attempts=3)))
+        ctx["face_model"].predict.return_value = {
+            "is_authorized": False, "is_live": True, "faces": [_tracked_face()],
+        }
+        state = VerifyingIdentityState(ctx)
+        state.on_enter(ctx)
+
+        triggers = [state.on_frame("frame", ctx) for _ in range(3)]
+        assert triggers == [None, None, "auth_failed"]
+
 
 # ---------------------------------------------------------------------------
 # ActiveDetectionState
@@ -345,6 +491,129 @@ class TestActiveDetectionState:
         ctx["injury_model"].unload.assert_called_once()
         ctx["activity_model"].unload.assert_called_once()
         ctx["face_model"].unload.assert_called_once()
+
+
+class TestActiveDetectionPresence:
+    @staticmethod
+    def _context(face_result=None):
+        ctx = _make_context(config=PipelineConfig(
+            detection=DetectionConfig(active_timeout_seconds=100.0)
+        ))
+        if face_result is not None:
+            ctx["face_model"].predict.return_value = face_result
+        return ctx
+
+    def test_face_model_stays_loaded_in_presence_mode(self):
+        ctx = self._context()
+        state = ActiveDetectionState(ctx)
+        state.on_enter(ctx)
+
+        ctx["face_model"].unload.assert_not_called()
+        ctx["face_model"].set_mode.assert_called_once_with("presence")
+        ctx["gesture_model"].unload.assert_called_once()
+        state.on_exit(ctx)
+
+    def test_face_runs_every_presence_interval_and_result_is_reused(self):
+        face = _tracked_face(status="AUTHORIZED", identity="Rahul Raj",
+                             confidence=88.0, auth_streak=9)
+        presence = {"authorized": ["Rahul Raj"], "unknown_count": 0,
+                    "uncertain_count": 0, "total": 1}
+        ctx = self._context({"faces": [face], "presence": presence, "frame_size": (640, 480)})
+        state = ActiveDetectionState(ctx)
+        state.on_enter(ctx)
+
+        for _ in range(25):
+            state.on_frame("frame", ctx)
+            _drain_face_worker(state)
+
+        # Frame 1 seeds every model, then every 10th frame at offset 3: 3, 13, 23.
+        assert ctx["face_model"].predict.call_count == 4
+        # Frame 25 didn't run the face model; the last result is reused.
+        detections = ctx["last_detections"]
+        assert detections["faces"] == [face]
+        assert detections["presence"] == presence
+        assert detections["faces_frame_size"] == (640, 480)
+        state.on_exit(ctx)
+
+    def test_presence_change_published_once(self):
+        presence = {"authorized": [], "unknown_count": 1, "uncertain_count": 0, "total": 1}
+        ctx = self._context({"faces": [_tracked_face()], "presence": presence})
+        state = ActiveDetectionState(ctx)
+        state.on_enter(ctx)
+        events = []
+        ctx["event_bus"].subscribe(EventType.PRESENCE_UPDATED, events.append)
+
+        for _ in range(15):
+            state.on_frame("frame", ctx)
+            _drain_face_worker(state)
+        ctx["event_bus"].flush()
+
+        assert len(events) == 1
+        assert events[0].unknown_count == 1
+        state.on_exit(ctx)
+
+    def test_on_exit_stops_worker_and_clears_faces(self):
+        presence = {"authorized": [], "unknown_count": 1, "uncertain_count": 0, "total": 1}
+        ctx = self._context({"faces": [_tracked_face()], "presence": presence})
+        state = ActiveDetectionState(ctx)
+        state.on_enter(ctx)
+        state.on_frame("frame", ctx)
+        _drain_face_worker(state)
+        state.on_frame("frame", ctx)
+        assert ctx["last_detections"]["faces"]
+
+        state.on_exit(ctx)
+        assert state._face_executor is None
+        assert ctx["last_detections"]["faces"] == []
+        assert "presence" not in ctx["last_detections"]
+        ctx["face_model"].unload.assert_called_once()
+
+
+class TestPresenceUpdates:
+    def test_published_on_change_only_not_every_frame(self):
+        ctx = _make_context(config=PipelineConfig(face_auth=FaceAuthConfig(max_attempts=100)))
+        state = VerifyingIdentityState(ctx)
+        state.on_enter(ctx)
+        events = []
+        ctx["event_bus"].subscribe(EventType.PRESENCE_UPDATED, events.append)
+
+        one = {"faces": [_tracked_face(1)],
+               "presence": {"authorized": [], "unknown_count": 1, "uncertain_count": 0, "total": 1}}
+        two = {"faces": [_tracked_face(1), _tracked_face(2)],
+               "presence": {"authorized": [], "unknown_count": 2, "uncertain_count": 0, "total": 2}}
+        for result in (one, one, one, two, two, one):
+            ctx["face_model"].predict.return_value = result
+            state.on_frame("frame", ctx)
+        ctx["event_bus"].flush()
+
+        assert all(isinstance(e, PresenceUpdated) for e in events)
+        assert [(e.unknown_count, e.total) for e in events] == [(1, 1), (2, 2), (1, 1)]
+
+    def test_same_people_not_reannounced_when_detection_starts(self):
+        presence = {"authorized": ["Rahul Raj"], "unknown_count": 0, "uncertain_count": 0, "total": 1}
+        face = _tracked_face(status="AUTHORIZED", identity="Rahul Raj",
+                             confidence=90.0, auth_streak=3)
+        ctx = _make_context(config=PipelineConfig(
+            detection=DetectionConfig(active_timeout_seconds=100.0)
+        ))
+        ctx["face_model"].predict.return_value = {
+            "is_authorized": True, "is_live": True, "faces": [face], "presence": presence,
+        }
+        events = []
+        ctx["event_bus"].subscribe(EventType.PRESENCE_UPDATED, events.append)
+
+        verifying = VerifyingIdentityState(ctx)
+        verifying.on_enter(ctx)
+        assert verifying.on_frame("frame", ctx) == "auth_success"
+        active = ActiveDetectionState(ctx)
+        active.on_enter(ctx)
+        for _ in range(5):
+            active.on_frame("frame", ctx)
+            _drain_face_worker(active)
+        active.on_exit(ctx)
+        ctx["event_bus"].flush()
+
+        assert len(events) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -487,3 +756,25 @@ class TestPipelineIntegration:
         _publish_frame(event_bus)
         assert sm.state == State.IDLE
         face_model.unload.assert_called()
+
+    def test_face_model_receives_full_resolution_frame(self):
+        event_bus = EventBus()
+        sm = StateMachine(active_detection_timeout=100.0, cooldown_duration=100.0)
+        face_model = _make_model(authorized=False, is_live=False)
+        Pipeline(
+            event_bus=event_bus,
+            state_machine=sm,
+            config=PipelineConfig(face_auth=FaceAuthConfig(max_attempts=5)),
+            gesture_model=_make_model(confidence=0.0, gesture="none"),
+            face_model=face_model,
+            fire_model=_make_model(detected=False),
+            injury_model=_make_model(detected=False),
+            activity_model=_make_model(detected=False),
+        )
+        sm.transition("gesture_candidate")
+        sm.transition("gesture_confirmed")
+        assert sm.state == State.VERIFYING_IDENTITY
+
+        event_bus.publish(ProcessedFrame(frame="320x240", original_frame="640x480"))
+        event_bus.flush()
+        face_model.predict.assert_called_with("640x480")
