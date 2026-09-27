@@ -14,6 +14,13 @@ face_auth:
   max_attempts: 3
   attempt_timeout_seconds: 10
   encodings_path: "data/face_encodings.pkl"
+  auth_threshold: 0.60           # smoothed cosine similarity for AUTHORIZED
+  unknown_threshold: 0.30        # below this for unknown_confirm_frames -> UNKNOWN
+  ema_alpha: 0.3                 # weight of the newest frame in the similarity EMA
+  unknown_confirm_frames: 5
+  track_max_missed: 10           # face-model runs a track survives unseen
+  presence_interval_frames: 10   # ACTIVE_DETECTION: face model every N frames
+  max_faces: 6
 
 fire:
   model_path: "data/model_artifacts/models/fire_yolov8n.onnx"

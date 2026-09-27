@@ -25,6 +25,13 @@ _C_DIM = (175, 161, 156)       # #9ca3af — secondary text
 _C_RED_TEXT = (99, 46, 255)    # text colour for low-FPS warning
 _C_BG = (32, 24, 17)           # neutral semi-transparent background
 
+# Tracked-face styling by status: (box / label background, label text).
+_FACE_STATUS_STYLE = {
+    "AUTHORIZED": (_C_CYAN, _C_TEXT),
+    "UNKNOWN": (_C_RED, _C_TEXT),
+    "UNCERTAIN": (_C_YELLOW, (0, 0, 0)),  # amber
+}
+
 _STATE_COLORS = {
     "IDLE": _C_GREEN,
     "VERIFYING_GESTURE": _C_ORANGE,
@@ -218,29 +225,38 @@ class FrameAnnotator:
             )
 
         # ------------------------------------------------------------------
-        # FACE — visible cyan rectangle + label directly above
-        # Skipped entirely if no bbox or confidence is below the face tier.
+        # FACES — one box per tracked person, coloured by status.  Results
+        # without ``faces`` fall back to the single cyan face box below.
         # ------------------------------------------------------------------
-        face_bbox = detections.get("face_bbox")
-        face_name = detections.get("face_name")
-        face_conf = _conf_pct(detections.get("face_confidence"))
-        face_src = detections.get("face_frame_size") or src_size
-        if face_bbox and _meets_threshold("face", face_conf):
-            scaled = scale_bbox(face_bbox, face_src, out_size)
-            logger.debug(
-                "Face bbox: raw=%s, face_src=%s, out_size=%s, scaled=%s",
-                face_bbox, face_src, out_size, scaled,
-            )
-            if scaled and scaled[2] > 0 and scaled[3] > 0:
-                x, y, w, h = scaled
-                cv2.rectangle(out, (x, y), (x + w, y + h), _C_CYAN, 2, _LINE)
-                _draw_corner_brackets(out, scaled, _C_CYAN, length=18, thickness=1)
+        faces = detections.get("faces")
+        if faces is not None:
+            faces_src = (detections.get("faces_frame_size")
+                         or detections.get("face_frame_size") or src_size)
+            for face in faces:
+                self._draw_tracked_face(out, face, faces_src, out_size, placed)
+        else:
+            # FACE — visible cyan rectangle + label directly above
+            # Skipped entirely if no bbox or confidence is below the face tier.
+            face_bbox = detections.get("face_bbox")
+            face_name = detections.get("face_name")
+            face_conf = _conf_pct(detections.get("face_confidence"))
+            face_src = detections.get("face_frame_size") or src_size
+            if face_bbox and _meets_threshold("face", face_conf):
+                scaled = scale_bbox(face_bbox, face_src, out_size)
+                logger.debug(
+                    "Face bbox: raw=%s, face_src=%s, out_size=%s, scaled=%s",
+                    face_bbox, face_src, out_size, scaled,
+                )
+                if scaled and scaled[2] > 0 and scaled[3] > 0:
+                    x, y, w, h = scaled
+                    cv2.rectangle(out, (x, y), (x + w, y + h), _C_CYAN, 2, _LINE)
+                    _draw_corner_brackets(out, scaled, _C_CYAN, length=18, thickness=1)
 
-                label = face_name or "UNKNOWN"
-                if face_conf is not None and face_name:
-                    label = f"{label} {face_conf}%"
-                self._safe_label(out, label, (x, max(20, y - 10)),
-                                 _C_TEXT, _C_CYAN, scale=_SCALE_LABEL, placed=placed)
+                    label = face_name or "UNKNOWN"
+                    if face_conf is not None and face_name:
+                        label = f"{label} {face_conf}%"
+                    self._safe_label(out, label, (x, max(20, y - 10)),
+                                     _C_TEXT, _C_CYAN, scale=_SCALE_LABEL, placed=placed)
 
         # ------------------------------------------------------------------
         # FIRE — pulsing red border + label, bbox-anchored only
@@ -497,6 +513,37 @@ class FrameAnnotator:
             return default
         x, y, _, _ = bbox
         return (x, max(20, y - 10))
+
+    def _draw_tracked_face(
+        self,
+        frame: np.ndarray,
+        face: Dict[str, Any],
+        src_size: Tuple[int, int],
+        out_size: Tuple[int, int],
+        placed: List[Tuple[int, int, int, int]],
+    ) -> None:
+        """Box + label for one tracked face: cyan AUTHORIZED, red UNKNOWN, amber UNCERTAIN."""
+        status = str(face.get("status", "UNCERTAIN")).upper()
+        color, text_color = _FACE_STATUS_STYLE.get(status, _FACE_STATUS_STYLE["UNCERTAIN"])
+        scaled = scale_bbox(face.get("bbox"), src_size, out_size)
+        if not scaled or scaled[2] <= 0 or scaled[3] <= 0:
+            return
+        x, y, w, h = scaled
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2, _LINE)
+        _draw_corner_brackets(frame, scaled, color, length=18, thickness=1)
+
+        track_id = face.get("track_id")
+        if status == "AUTHORIZED":
+            conf = _conf_pct(face.get("confidence"))
+            label = str(face.get("identity") or "AUTHORIZED")
+            if conf is not None:
+                label = f"{label} {conf}%"
+        elif status == "UNKNOWN":
+            label = f"UNKNOWN #{track_id}"
+        else:
+            label = f"? #{track_id}"
+        self._safe_label(frame, label, (x, max(20, y - 10)), text_color, color,
+                         scale=_SCALE_LABEL, placed=placed)
 
     def _draw_landmarks(
         self,

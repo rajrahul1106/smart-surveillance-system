@@ -42,6 +42,8 @@ class EventType(Enum):
     # Auth
     AUTH_SUCCESS = auto()
     AUTH_FAILED = auto()
+    # Presence
+    PRESENCE_UPDATED = auto()
     # Detection
     FIRE_DETECTED = auto()
     INJURY_DETECTED = auto()

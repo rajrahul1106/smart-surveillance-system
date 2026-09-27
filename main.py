@@ -65,7 +65,18 @@ def main() -> None:
     from models.activity_model import ActivityModel
 
     gesture_model = GestureModel()
-    face_model = FaceModel(encodings_path=cfg.face_auth.encodings_path)
+    # face_auth.presence_interval_frames is read by ActiveDetectionState
+    # from the same config.
+    face_auth = cfg.face_auth
+    face_model = FaceModel(
+        encodings_path=face_auth.encodings_path,
+        match_threshold=face_auth.auth_threshold,
+        unknown_threshold=face_auth.unknown_threshold,
+        ema_alpha=face_auth.ema_alpha,
+        unknown_confirm_frames=face_auth.unknown_confirm_frames,
+        track_max_missed=face_auth.track_max_missed,
+        max_faces=face_auth.max_faces,
+    )
     fire_model = FireModel()
     injury_model = InjuryModel()
     activity_model = ActivityModel(

@@ -40,10 +40,33 @@ class FaceAuthConfig:
     max_attempts: int = 3
     attempt_timeout_seconds: float = 10.0
     encodings_path: str = "data/face_encodings.pkl"
+    # Multi-person identification. Defaults mirror FaceModel's class constants.
+    auth_threshold: float = 0.60
+    unknown_threshold: float = 0.30
+    ema_alpha: float = 0.3
+    unknown_confirm_frames: int = 5
+    track_max_missed: int = 10
+    presence_interval_frames: int = 10
+    max_faces: int = 6
 
     def validate(self) -> None:
         if self.attempt_timeout_seconds <= 0:
             raise ValueError("face_auth.attempt_timeout_seconds must be > 0")
+        if not 0.0 <= self.unknown_threshold <= self.auth_threshold <= 1.0:
+            raise ValueError(
+                "face_auth thresholds must satisfy "
+                "0 <= unknown_threshold <= auth_threshold <= 1"
+            )
+        if not 0.0 < self.ema_alpha <= 1.0:
+            raise ValueError("face_auth.ema_alpha must be in (0, 1]")
+        if self.unknown_confirm_frames < 1:
+            raise ValueError("face_auth.unknown_confirm_frames must be >= 1")
+        if self.track_max_missed < 0:
+            raise ValueError("face_auth.track_max_missed must be >= 0")
+        if self.presence_interval_frames < 1:
+            raise ValueError("face_auth.presence_interval_frames must be >= 1")
+        if self.max_faces < 1:
+            raise ValueError("face_auth.max_faces must be >= 1")
 
 
 @dataclass

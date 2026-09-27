@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from core.event_bus import EventType
 from core.events import GestureCandidate, GestureNearMiss
 from core.states.base_state import AbstractState
+from core.states.presence import reset_presence
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,22 @@ class IdleState(AbstractState):
         # dashboard no longer shows AUTHORIZED after cooldown ends.
         detections = context.get("last_detections") or {}
         for key in ("face_bbox", "face_name", "face_confidence",
-                     "face_authorized", "face_frame_size"):
+                     "face_authorized", "face_frame_size",
+                     "faces", "faces_frame_size", "presence",
+                     "authenticated_user", "authenticated_users"):
             detections.pop(key, None)
         context["last_detections"] = detections
+        # Presence monitoring is over; the next session announces its own.
+        reset_presence(context)
 
     def on_exit(self, context: Dict[str, Any]) -> None:
         pass
 
     def on_frame(self, frame: Any, context: Dict[str, Any]) -> Optional[str]:
+        # COOLDOWN -> IDLE fires on a timer thread, so a frame can arrive
+        # while on_enter is still loading the gesture model. Skip it.
+        if not self._gesture_model.is_loaded:
+            return None
         result = self._gesture_model.predict(frame)
         confidence = result.get("confidence", 0.0)
 

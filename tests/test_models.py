@@ -365,6 +365,186 @@ class TestFaceModel:
             assert model._app is None
 
 
+_ENROLLED = np.ones(512, dtype=np.float32) / np.sqrt(512)
+# Orthogonal to _ENROLLED (cosine similarity 0): a stranger.
+_STRANGER = np.array([1.0, -1.0] * 256, dtype=np.float32) / np.sqrt(512)
+
+
+def _face_model_with(faces=(), **kwargs):
+    """A loaded FaceModel whose mocked insightface app returns *faces*.
+
+    Uses a missing encodings file so real enrollments never leak in.
+    """
+    with patch.dict("sys.modules", _mock_insightface(faces=list(faces))):
+        model = FaceModel(encodings_path="/nonexistent/enc.pkl", **kwargs)
+        model.load()
+    return model
+
+
+class TestFaceModelMultiFace:
+    def test_enrolled_face_authorized_and_stranger_unknown(self):
+        model = _face_model_with([
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+            _fake_face(bbox=(400, 60, 500, 180), embedding=_STRANGER),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        first = {f["bbox"]: f for f in model.predict(_dummy_frame())["faces"]}
+        rahul, stranger = first[(40, 60, 100, 120)], first[(400, 60, 100, 120)]
+        assert rahul["status"] == "AUTHORIZED"
+        assert rahul["identity"] == "Rahul Raj"
+        assert stranger["status"] == "UNCERTAIN"
+        assert stranger["identity"] is None
+
+        for _ in range(FaceModel.UNKNOWN_CONFIRM_FRAMES - 1):
+            result = model.predict(_dummy_frame())
+        faces = {f["track_id"]: f for f in result["faces"]}
+        assert faces[rahul["track_id"]]["status"] == "AUTHORIZED"
+        assert faces[rahul["track_id"]]["identity"] == "Rahul Raj"
+        assert faces[rahul["track_id"]]["confidence"] == pytest.approx(100.0, abs=0.1)
+        assert faces[stranger["track_id"]]["status"] == "UNKNOWN"
+        assert faces[stranger["track_id"]]["identity"] is None
+        model.unload()
+
+    def test_presence_counts_with_zero_one_and_three_faces(self):
+        model = _face_model_with([])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": [], "unknown_count": 0, "uncertain_count": 0, "total": 0,
+        }
+
+        model._app.get.return_value = [_fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED)]
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": ["Rahul Raj"], "unknown_count": 0, "uncertain_count": 0, "total": 1,
+        }
+
+        model._app.get.return_value = [
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+            _fake_face(bbox=(250, 60, 350, 180), embedding=_STRANGER),
+            _fake_face(bbox=(450, 60, 550, 180), embedding=_STRANGER),
+        ]
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": ["Rahul Raj"], "unknown_count": 0, "uncertain_count": 2, "total": 3,
+        }
+        for _ in range(FaceModel.UNKNOWN_CONFIRM_FRAMES - 1):
+            presence = model.predict(_dummy_frame())["presence"]
+        assert presence == {
+            "authorized": ["Rahul Raj"], "unknown_count": 2, "uncertain_count": 0, "total": 3,
+        }
+        model.unload()
+
+    def test_top_level_keys_describe_the_authorized_face(self):
+        # The stranger is the larger face; the legacy keys must still
+        # describe the AUTHORIZED one.
+        model = _face_model_with([
+            _fake_face(bbox=(300, 50, 600, 400), embedding=_STRANGER),
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        result = model.predict(_dummy_frame())
+        for key in ("user_id", "name", "label", "confidence", "is_live",
+                    "authorized", "is_authorized", "bbox", "frame_size"):
+            assert key in result, f"Missing key: {key}"
+        assert result["user_id"] == "Rahul Raj"
+        assert result["name"] == "Rahul Raj"
+        assert result["label"] == "Rahul Raj"
+        assert result["authorized"] is True
+        assert result["is_authorized"] is True
+        assert result["is_live"] is True
+        assert result["confidence"] == pytest.approx(1.0, abs=1e-3)
+        assert result["bbox"] == (40, 60, 100, 120)
+        assert result["frame_size"] == (640, 480)
+        model.unload()
+
+    def test_top_level_keys_fall_back_to_the_largest_face(self):
+        model = _face_model_with([
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_STRANGER),
+            _fake_face(bbox=(300, 50, 600, 400), embedding=_STRANGER),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        result = model.predict(_dummy_frame())
+        assert result["is_authorized"] is False
+        assert result["user_id"] is None
+        assert result["label"] == "UNKNOWN"
+        assert result["bbox"] == (300, 50, 300, 350)
+        model.unload()
+
+    def test_person_score_is_the_max_over_their_samples(self):
+        model = _face_model_with([_fake_face(embedding=_ENROLLED)])
+        model.add_encoding("Rahul Raj", _STRANGER)   # a poor sample
+        model.add_encoding("Rahul Raj", _ENROLLED)   # a good sample
+
+        face = model.predict(_dummy_frame())["faces"][0]
+        assert face["status"] == "AUTHORIZED"
+        assert face["identity"] == "Rahul Raj"
+        assert face["confidence"] == pytest.approx(100.0, abs=0.1)
+        model.unload()
+
+    def test_presence_mode_uses_full_frame_and_verify_mode_crops(self):
+        model = _face_model_with([_fake_face(bbox=(100, 100, 200, 200))])
+        frame = np.random.default_rng(0).integers(0, 255, (480, 640, 3), dtype=np.uint8)
+
+        assert model.mode == "verify"
+        assert model.predict(frame)["bbox"] == (166, 142, 70, 70)  # remapped out of the crop
+        assert not np.array_equal(model._app.get.call_args[0][0], frame)
+
+        model.set_mode("presence")
+        assert model.predict(frame)["bbox"] == (100, 100, 100, 100)  # full frame, no remap
+        np.testing.assert_array_equal(model._app.get.call_args[0][0], frame)
+        model.unload()
+
+    def test_caps_at_max_faces_keeping_the_largest(self):
+        # Eight non-overlapping faces, widths 20, 25, ..., 55 px.
+        faces = [
+            _fake_face(bbox=(i * 75, 10, i * 75 + 20 + 5 * i, 30 + 5 * i))
+            for i in range(8)
+        ]
+        model = _face_model_with(faces, max_faces=6)
+        model.set_mode("presence")
+
+        result = model.predict(_dummy_frame())
+        assert len(result["faces"]) == 6
+        assert sorted(f["bbox"][2] for f in result["faces"]) == [30, 35, 40, 45, 50, 55]
+        model.unload()
+
+    def test_loads_only_needed_modules_and_sets_det_thresh_per_mode(self):
+        modules = _mock_insightface()
+        with patch.dict("sys.modules", modules):
+            model = FaceModel(encodings_path="/nonexistent/enc.pkl")
+            model.load()
+
+        kwargs = modules["insightface.app"].FaceAnalysis.call_args.kwargs
+        assert kwargs["allowed_modules"] == ["detection", "recognition"]
+        prepare = model._app.prepare.call_args.kwargs
+        assert prepare["det_size"] == (960, 960)
+        assert prepare["det_thresh"] == FaceModel.VERIFY_DET_THRESH
+
+        model.set_mode("presence")
+        assert model._app.det_model.det_thresh == FaceModel.PRESENCE_DET_THRESH
+        model.set_mode("verify")
+        assert model._app.det_model.det_thresh == FaceModel.VERIFY_DET_THRESH
+        with pytest.raises(ValueError):
+            model.set_mode("crowd")
+        model.unload()
+
+    def test_unload_resets_tracks_and_mode(self):
+        model = _face_model_with([_fake_face()])
+        model.set_mode("presence")
+        model.predict(_dummy_frame())
+        assert model._tracker.tracks
+
+        model.unload()
+        assert model._tracker.tracks == []
+        assert model.mode == "verify"
+
+
 # ---------------------------------------------------------------------------
 # FireModel (YOLOv8n ONNX)
 # ---------------------------------------------------------------------------

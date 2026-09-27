@@ -60,6 +60,19 @@ class EnrollStartRequest(BaseModel):
     name: str
 
 
+def _presence_summary(snapshot: Any) -> Dict[str, Any]:
+    """Latest presence summary from the pipeline snapshot (empty when not monitoring)."""
+    presence = snapshot.detections.get("presence") if snapshot is not None else None
+    if not isinstance(presence, dict):
+        presence = {}
+    return {
+        "authorized": list(presence.get("authorized") or []),
+        "unknown_count": int(presence.get("unknown_count", 0)),
+        "uncertain_count": int(presence.get("uncertain_count", 0)),
+        "total": int(presence.get("total", 0)),
+    }
+
+
 @router.get("/status")
 def get_status() -> Dict[str, Any]:
     sm = _deps["state_machine"]
@@ -90,22 +103,22 @@ def get_status() -> Dict[str, Any]:
             else:
                 models_status[name] = "unloaded"
 
-    # If face_model is offline but the current state still has an active
-    # auth session (face_authorized=True in the latest snapshot), report
-    # AUTHORIZED instead of OFFLINE so the dashboard reflects the auth.
-    if models_status.get("face") in ("OFFLINE", "unloaded"):
-        current_state = sm.state.name
-        if current_state in ("ACTIVE_DETECTION", "COOLDOWN"):
-            shared = _deps.get("shared_frame")
-            if shared is not None:
-                try:
-                    snap = shared.get_snapshot()
-                    if snap.detections.get("face_authorized"):
-                        models_status["face"] = "AUTHORIZED"
-                except Exception:
-                    pass
-
     shared = _deps.get("shared_frame")
+    snapshot = None
+    if shared is not None:
+        try:
+            snapshot = shared.get_snapshot()
+        except Exception:
+            snapshot = None
+
+    # While an auth session is active (face_authorized=True in the latest
+    # snapshot during ACTIVE_DETECTION / COOLDOWN) report the face slot as
+    # AUTHORIZED. The face model stays loaded through ACTIVE_DETECTION for
+    # presence monitoring, so its own status would otherwise hide the auth.
+    if sm.state.name in ("ACTIVE_DETECTION", "COOLDOWN") and snapshot is not None:
+        if snapshot.detections.get("face_authorized"):
+            models_status["face"] = "AUTHORIZED"
+
     processing_fps = 0.0
     if shared is not None:
         try:
@@ -127,6 +140,7 @@ def get_status() -> Dict[str, Any]:
         },
         "processing_fps": round(processing_fps, 1),
         "models": models_status,
+        "presence": _presence_summary(snapshot),
         "uptime_seconds": round(time.time() - _start_time, 2),
         "config": {
             "camera_index": getattr(cfg.camera, "index", 0) if hasattr(cfg, "camera") else 0,

@@ -116,6 +116,21 @@ class AuthFailed:
 
 
 # ---------------------------------------------------------------------------
+# Presence events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PresenceUpdated:
+    """Who is in view changed.  Published on change only, never per frame."""
+    event_type: ClassVar[EventType] = EventType.PRESENCE_UPDATED
+    authorized: List[str] = field(default_factory=list)
+    unknown_count: int = 0
+    uncertain_count: int = 0
+    total: int = 0
+    timestamp: float = field(default_factory=time.time)
+
+
+# ---------------------------------------------------------------------------
 # Detection events
 # ---------------------------------------------------------------------------
 

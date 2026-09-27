@@ -111,6 +111,28 @@ class TestGetStatus:
         assert models["gesture"] == "loaded"
         assert models["face"] == "unloaded"
 
+    def test_presence_empty_when_not_monitoring(self, client):
+        assert client.get("/api/status").json()["presence"] == {
+            "authorized": [], "unknown_count": 0, "uncertain_count": 0, "total": 0,
+        }
+
+    def test_presence_and_face_authorized_during_active_detection(self, client, mock_deps):
+        import api.routes as routes_mod
+        from core.shared_frame import SharedFrame
+
+        presence = {"authorized": ["Rahul Raj"], "unknown_count": 1, "uncertain_count": 0, "total": 2}
+        shared = SharedFrame()
+        shared.set(None, "ACTIVE_DETECTION", {"face_authorized": True, "presence": presence})
+        routes_mod._deps["shared_frame"] = shared
+        for trigger in ("gesture_candidate", "gesture_confirmed", "auth_success"):
+            mock_deps["state_machine"].transition(trigger)
+        # The face model now stays loaded through ACTIVE_DETECTION.
+        mock_deps["face_model"].is_loaded = True
+
+        data = client.get("/api/status").json()
+        assert data["presence"] == presence
+        assert data["models"]["face"] == "AUTHORIZED"
+
     def test_config_subset(self, client):
         cfg = client.get("/api/status").json()["config"]
         assert "camera_index" in cfg

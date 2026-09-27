@@ -137,6 +137,8 @@ body {
 .kv-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; }
 .kv-row .k { color: var(--dim); font-size: 12px; }
 .kv-row .v { color: var(--text); font-family: 'Menlo', monospace; font-size: 12px; }
+.kv-row .v.danger { color: var(--danger); font-weight: 700; text-shadow: 0 0 10px rgba(255, 46, 99, 0.45); }
+.presence-head { font-size: 11px; color: var(--dim); letter-spacing: 3px; text-transform: uppercase; margin-bottom: 4px; }
 
 .model-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -371,6 +373,11 @@ body {
       <div class="kv-row"><span class="k">Capture FPS</span><span class="v" id="kvCamFps">--</span></div>
       <div class="kv-row"><span class="k">Process FPS</span><span class="v" id="kvProcFps">--</span></div>
       <div class="kv-row"><span class="k">Frames</span><span class="v" id="kvCamFrames">--</span></div>
+      <div class="divider"></div>
+      <div class="presence-head">Presence</div>
+      <div class="kv-row"><span class="k">Authorized</span><span class="v" id="presAuthorized">--</span></div>
+      <div class="kv-row"><span class="k">Unknown</span><span class="v" id="presUnknown">0</span></div>
+      <div class="kv-row"><span class="k">Total</span><span class="v" id="presTotal">0</span></div>
     </div>
   </section>
 
@@ -508,6 +515,7 @@ body {
           setFaceStatus('idle', 'No face in frame');
           detections.face = null;
           updateModelStatus('face', 'OFFLINE');
+          renderPresence(null);
         }
         break;
 
@@ -516,12 +524,19 @@ body {
         var conf = msg.result && msg.result.confidence;
         setFaceStatus('authorized', 'AUTHORIZED: ' + name + (conf ? ' (' + Math.round(conf * 100) + '%)' : ''));
         detections.face = { name: name, authorized: true, confidence: conf || 0 };
+        // The face model stays loaded for presence monitoring, so no
+        // MODEL_UNLOADED event arrives to flip this slot to AUTHORIZED.
+        updateModelStatus('face', 'AUTHORIZED');
         renderThreats();
         break;
 
       case 'AUTH_FAILED':
         setFaceStatus('unauthorized', 'UNAUTHORIZED: Unknown');
         detections.face = null;
+        break;
+
+      case 'PRESENCE_UPDATED':
+        renderPresence(msg);
         break;
 
       case 'FIRE_DETECTED':
@@ -811,6 +826,17 @@ body {
     if (wrap) wrap.scrollLeft = tl.scrollWidth;
   }
 
+  // ---------------------------------------------------------- presence
+  function renderPresence(p) {
+    p = p || {};
+    var names = Array.isArray(p.authorized) ? p.authorized : [];
+    var unknown = p.unknown_count || 0;
+    $('presAuthorized').textContent = names.length ? names.join(', ') : '--';
+    $('presUnknown').textContent = unknown;
+    $('presUnknown').classList.toggle('danger', unknown > 0);
+    $('presTotal').textContent = p.total || 0;
+  }
+
   // ---------------------------------------------------------- model status
   function updateModelStatus(key, status) {
     var dot = document.querySelector('[data-model="' + key + '"] .model-dot');
@@ -983,6 +1009,7 @@ body {
       $('kvCamFrames').textContent = data.camera.frame_count;
       systemUptime = data.uptime_seconds;
       renderModelList(data.models || {});
+      renderPresence(data.presence);
 
       var pill = $('modePill');
       var dry = !!(data.config && data.config.alerts_dry_run);
