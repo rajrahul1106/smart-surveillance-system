@@ -77,7 +77,16 @@ def main() -> None:
         track_max_missed=face_auth.track_max_missed,
         max_faces=face_auth.max_faces,
     )
-    fire_model = FireModel()
+    fire_cfg = cfg.fire
+    fire_model = FireModel(
+        model_path=fire_cfg.model_path,
+        labels_path=fire_cfg.labels_path,
+        confidence_threshold=fire_cfg.confidence_threshold,
+        iou_threshold=fire_cfg.iou_threshold,
+        input_size=fire_cfg.input_size,
+        score_threshold=fire_cfg.score_threshold,
+        score_cap=fire_cfg.score_cap,
+    )
     injury_model = InjuryModel()
     activity_model = ActivityModel(
         loitering_threshold_seconds=cfg.detection.loitering_threshold_seconds,

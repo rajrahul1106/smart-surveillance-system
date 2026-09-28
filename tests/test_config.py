@@ -17,6 +17,7 @@ from core.config import (
     CameraConfig,
     DetectionConfig,
     FaceAuthConfig,
+    FireConfig,
     FrameConfig,
     GestureConfig,
     LoggingConfig,
@@ -236,6 +237,11 @@ camera:
         with pytest.raises(ValueError, match="face_auth.presence_interval_frames"):
             cfg.validate()
 
+    def test_fire_score_cap_below_threshold(self):
+        cfg = AppConfig(fire=FireConfig(score_threshold=3.0, score_cap=2.0))
+        with pytest.raises(ValueError, match="fire.score_cap"):
+            cfg.validate()
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -274,6 +280,25 @@ class TestDefaults:
         assert cfg.face_auth.track_max_missed == 10
         assert cfg.face_auth.presence_interval_frames == 10
         assert cfg.face_auth.max_faces == 6
+
+    def test_fire_defaults_match_fire_model(self):
+        from models.fire_model import FireModel
+
+        cfg = FireConfig()
+        assert cfg.model_path == FireModel.MODEL_PATH
+        assert cfg.labels_path == FireModel.LABELS_PATH
+        assert cfg.confidence_threshold == FireModel.CONFIDENCE_THRESHOLD
+        assert cfg.iou_threshold == FireModel.IOU_THRESHOLD
+        assert cfg.input_size == FireModel.INPUT_SIZE
+        assert cfg.score_threshold == FireModel.SCORE_THRESHOLD
+        assert cfg.score_cap == FireModel.SCORE_CAP
+
+    def test_repo_config_uses_yolo11s_at_conf_035(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.fire.model_path.endswith("fire_yolo11s_480.onnx")
+        assert cfg.fire.labels_path.endswith("fire_yolo11s_labels.json")
+        assert cfg.fire.confidence_threshold == 0.35
+        assert cfg.fire.input_size == 480
 
     def test_app_config_all_sections_populated(self):
         cfg = AppConfig()

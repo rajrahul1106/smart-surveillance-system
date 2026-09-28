@@ -1,0 +1,19 @@
+{
+  "classes": [
+    "fire",
+    "smoke"
+  ],
+  "img_size": 640,
+  "onnx_input_sizes": [
+    640,
+    480,
+    416
+  ],
+  "arch": "yolo11s",
+  "input_layout": "NCHW",
+  "input": "RGB, letterboxed to a square with pad value 114, scaled to [0,1] (no mean/std)",
+  "output": "(1, 6, N): cx, cy, w, h, then one score per class",
+  "confidence_threshold": 0.35,
+  "recommended_confidence": 0.22,
+  "iou_threshold": 0.45
+}

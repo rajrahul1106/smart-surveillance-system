@@ -546,17 +546,26 @@ class TestFaceModelMultiFace:
 
 
 # ---------------------------------------------------------------------------
-# FireModel (YOLOv8n ONNX)
+# FireModel (YOLO11s ONNX)
 # ---------------------------------------------------------------------------
 
+_REAL_FIRE_MODEL = os.path.join(
+    _project_root, "data", "model_artifacts", "models", "fire_yolo11s_480.onnx",
+)
+requires_real_fire_model = pytest.mark.skipif(
+    not os.path.isfile(_REAL_FIRE_MODEL), reason="fire_yolo11s_480.onnx not present",
+)
+
+
 def _yolo_fire_output(
-    cx: float = 320, cy: float = 320,
-    w: float = 320, h: float = 320,
+    cx: float = 240, cy: float = 240,
+    w: float = 240, h: float = 240,
     fire_conf: float = 0.9, smoke_conf: float = 0.01,
 ) -> np.ndarray:
-    """Create a synthetic YOLOv8 output tensor with one detection.
+    """Create a synthetic YOLO output tensor with one detection.
 
-    Shape: ``(1, 6, 1)`` — batch=1, channels=4(box)+2(classes), preds=1.
+    The box is in 480×480 model-input pixels (centred).  Shape: ``(1, 6, 1)``
+    — batch=1, channels=4(box)+2(classes), preds=1.
     """
     data = np.zeros((1, 6, 1), dtype=np.float32)
     data[0, 0, 0] = cx
@@ -649,7 +658,7 @@ class TestFireModel:
 
     def test_no_crash_without_onnx_model(self):
         # When the ONNX file is absent, every frame returns not-detected.
-        model = FireModel()
+        model = FireModel(model_path="/nonexistent/fire_yolo11s_480.onnx")
         model.load()
         white = np.full((100, 100, 3), 240, dtype=np.uint8)
         for _ in range(10):
@@ -663,6 +672,67 @@ class TestFireModel:
         assert model._classify_severity(0.20) == "hazardous"
         assert model._classify_severity(0.08) == "controllable"
         assert model._classify_severity(0.025) == "small"
+
+    def test_defaults_point_at_yolo11s_480(self):
+        assert FireModel.MODEL_PATH.endswith("fire_yolo11s_480.onnx")
+        assert FireModel.LABELS_PATH.endswith("fire_yolo11s_labels.json")
+        assert FireModel.INPUT_SIZE == 480
+        assert FireModel.CONFIDENCE_THRESHOLD == 0.35
+
+    def test_load_trusts_onnx_over_config_and_labels_file(self, tmp_path, caplog):
+        model_file = tmp_path / "fire.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        labels = tmp_path / "labels.json"
+        labels.write_text('{"classes": ["smoke", "fire"]}')  # disagrees with ONNX
+
+        model_input = MagicMock(shape=[1, 3, 480, 480])
+        model_input.name = "images"
+        session = MagicMock()
+        session.get_inputs.return_value = [model_input]
+        session.get_modelmeta.return_value.custom_metadata_map = {
+            "description": "Ultralytics YOLO11s model trained on fire.yaml",
+            "names": "{0: 'fire', 1: 'smoke'}",
+        }
+
+        model = FireModel(model_path=str(model_file), labels_path=str(labels), input_size=416)
+        caplog.set_level("INFO", logger="models.fire_model")
+        with patch("onnxruntime.InferenceSession", return_value=session):
+            model.load()
+
+        assert model._input_size == 480                          # ONNX shape wins
+        assert model._class_names == {0: "fire", 1: "smoke"}      # ONNX names win
+        assert "using the ONNX metadata" in caplog.text           # mismatch warned
+        assert ("FireModel loaded - YOLO11s ONNX, input=[1,3,480,480], "
+                "classes=['fire','smoke'], conf=0.35, iou=0.45, trigger=3.0") in caplog.text
+        model.unload()
+
+
+@requires_real_fire_model
+class TestFireModelRealOnnx:
+    """Runs the real fire_yolo11s_480.onnx; skipped when the file isn't present."""
+
+    def test_signature(self):
+        model = FireModel(model_path=_REAL_FIRE_MODEL)
+        model.load()
+        session = model._session
+        assert session.get_inputs()[0].shape == [1, 3, 480, 480]
+        blob = np.zeros((1, 3, 480, 480), dtype=np.float32)
+        output = session.run(None, {model._input_name: blob})[0]
+        assert output.ndim == 3 and output.shape[:2] == (1, 6) and output.shape[2] > 0
+        assert [model._class_names[i] for i in sorted(model._class_names)] == ["fire", "smoke"]
+        assert model._input_size == 480
+        model.unload()
+
+    @pytest.mark.parametrize("value", [0, 255], ids=["black", "bright_white"])
+    def test_blank_frames_never_trigger(self, value):
+        # Basic guard against bright-light false positives.
+        model = FireModel(model_path=_REAL_FIRE_MODEL)
+        model.load()
+        frame = np.full((480, 640, 3), value, dtype=np.uint8)
+        results = [model.predict(frame) for _ in range(10)]
+        assert not any(r["detected"] for r in results)
+        assert results[-1]["fire_score"] == 0.0  # not even one raw detection
+        model.unload()
 
 
 # ---------------------------------------------------------------------------

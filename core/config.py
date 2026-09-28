@@ -88,6 +88,30 @@ class DetectionConfig:
 
 
 @dataclass
+class FireConfig:
+    # Defaults mirror FireModel's class constants.
+    model_path: str = "data/model_artifacts/models/fire_yolo11s_480.onnx"
+    labels_path: str = "data/model_artifacts/models/fire_yolo11s_labels.json"
+    confidence_threshold: float = 0.35
+    iou_threshold: float = 0.45
+    input_size: int = 480
+    score_threshold: float = 3.0
+    score_cap: float = 10.0
+
+    def validate(self) -> None:
+        if not 0.0 < self.confidence_threshold <= 1.0:
+            raise ValueError("fire.confidence_threshold must be in (0, 1]")
+        if not 0.0 < self.iou_threshold <= 1.0:
+            raise ValueError("fire.iou_threshold must be in (0, 1]")
+        if self.input_size <= 0:
+            raise ValueError("fire.input_size must be > 0")
+        if self.score_threshold <= 0:
+            raise ValueError("fire.score_threshold must be > 0")
+        if self.score_cap < self.score_threshold:
+            raise ValueError("fire.score_cap must be >= fire.score_threshold")
+
+
+@dataclass
 class AlertsConfig:
     dry_run: bool = True
     webhook_url: str = ""
@@ -131,6 +155,7 @@ class AppConfig:
     gesture: GestureConfig = field(default_factory=GestureConfig)
     face_auth: FaceAuthConfig = field(default_factory=FaceAuthConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    fire: FireConfig = field(default_factory=FireConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     frame: FrameConfig = field(default_factory=FrameConfig)
@@ -140,6 +165,7 @@ class AppConfig:
         self.gesture.validate()
         self.face_auth.validate()
         self.detection.validate()
+        self.fire.validate()
         self.alerts.validate()
         self.logging.validate()
         self.frame.validate()
@@ -157,6 +183,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         gesture=_build(GestureConfig, raw.get("gesture")),
         face_auth=_build(FaceAuthConfig, raw.get("face_auth")),
         detection=_build(DetectionConfig, raw.get("detection")),
+        fire=_build(FireConfig, raw.get("fire")),
         alerts=_build(AlertsConfig, raw.get("alerts")),
         logging=_build(LoggingConfig, raw.get("logging")),
         frame=_build(FrameConfig, raw.get("frame")),
