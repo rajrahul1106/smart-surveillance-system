@@ -16,10 +16,11 @@ face_auth:
   encodings_path: "data/face_encodings.pkl"
 
 fire:
-  model_path: "data/model_artifacts/models/fire_yolov8n.onnx"
-  confidence_threshold: 0.35
+  model_path: "data/model_artifacts/models/fire_yolo11s_480.onnx"
+  labels_path: "data/model_artifacts/models/fire_yolo11s_labels.json"
+  confidence_threshold: 0.35   # 1.0% false-positive frames on D-Fire negatives (0.22 gives 2.4%)
   iou_threshold: 0.45
-  input_size: 416
+  input_size: 480              # fallback only; the ONNX input shape wins at load
   score_threshold: 3.0
   score_cap: 10.0
 

@@ -1,0 +1,594 @@
+{
+  "model": "YOLO11s",
+  "classes": [
+    "fire",
+    "smoke"
+  ],
+  "hardware": {
+    "gpu": "Tesla T4",
+    "cpus": 2,
+    "ram_gb": 12.7,
+    "disk_free_gb": 60.6,
+    "python": "3.13.15",
+    "torch": "2.11.0+cu128",
+    "ultralytics": "8.4.163"
+  },
+  "settings": {
+    "epochs": 100,
+    "imgsz": 640,
+    "patience": 25,
+    "seed": 42,
+    "deploy_conf": 0.35,
+    "deploy_iou": 0.45,
+    "quick_test": false
+  },
+  "data": {
+    "sources": {
+      "dfire": "D-Fire (Kaggle copy)",
+      "mytest-hrswj": "Roboflow",
+      "fire-detection-yolo-1gn9t": "Roboflow"
+    },
+    "splits": {
+      "dfire -> test": {
+        "images": 4306,
+        "fire_boxes": 2878,
+        "smoke_boxes": 2311,
+        "negative_images": 2005,
+        "dropped_as_test_duplicate": 0
+      },
+      "fire-detection-yolo-1gn9t -> test_v1": {
+        "images": 794,
+        "fire_boxes": 1411,
+        "smoke_boxes": 553,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 0
+      },
+      "mytest-hrswj -> test_v1": {
+        "images": 221,
+        "fire_boxes": 364,
+        "smoke_boxes": 0,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 0
+      },
+      "dfire -> train": {
+        "images": 14122,
+        "fire_boxes": 9631,
+        "smoke_boxes": 7788,
+        "negative_images": 6458,
+        "dropped_as_test_duplicate": 0
+      },
+      "fire-detection-yolo-1gn9t -> train": {
+        "images": 16253,
+        "fire_boxes": 28388,
+        "smoke_boxes": 10843,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 248
+      },
+      "mytest-hrswj -> train": {
+        "images": 1065,
+        "fire_boxes": 1630,
+        "smoke_boxes": 0,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 570
+      },
+      "dfire -> val": {
+        "images": 3099,
+        "fire_boxes": 2176,
+        "smoke_boxes": 1755,
+        "negative_images": 1375,
+        "dropped_as_test_duplicate": 0
+      },
+      "fire-detection-yolo-1gn9t -> val": {
+        "images": 1535,
+        "fire_boxes": 2755,
+        "smoke_boxes": 1052,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 66
+      },
+      "mytest-hrswj -> val": {
+        "images": 356,
+        "fire_boxes": 529,
+        "smoke_boxes": 0,
+        "negative_images": 0,
+        "dropped_as_test_duplicate": 172
+      },
+      "test leak-free subset": {
+        "images": 2295,
+        "near_duplicate_of_train_pct": 46.7
+      },
+      "test_v1 leak-free subset": {
+        "images": 997,
+        "near_duplicate_of_train_pct": 1.8
+      }
+    }
+  },
+  "training": {
+    "epochs_run": 100,
+    "best_epoch": 86,
+    "best_val_mAP50_95": 0.39448,
+    "best_val_mAP50": 0.69457,
+    "hours_this_session": 0.0,
+    "hyperparameters": {
+      "data": "/content/datasets/sentinel_fire/data.yaml",
+      "epochs": 100,
+      "imgsz": 640,
+      "batch": -1,
+      "workers": 2,
+      "cache": "disk",
+      "project": "/content/runs",
+      "name": "yolo11s_dfire_roboflow",
+      "exist_ok": true,
+      "seed": 42,
+      "deterministic": true,
+      "patience": 25,
+      "optimizer": "SGD",
+      "lr0": 0.01,
+      "lrf": 0.01,
+      "momentum": 0.937,
+      "weight_decay": 0.0005,
+      "warmup_epochs": 3.0,
+      "cos_lr": true,
+      "close_mosaic": 10,
+      "hsv_h": 0.005,
+      "hsv_s": 0.6,
+      "hsv_v": 0.4,
+      "degrees": 0.0,
+      "translate": 0.1,
+      "scale": 0.5,
+      "flipud": 0.0,
+      "fliplr": 0.5,
+      "mosaic": 1.0,
+      "mixup": 0.1,
+      "amp": true,
+      "plots": true
+    }
+  },
+  "tests": {
+    "dfire_official": {
+      "mAP50_95": 0.45316473488402964,
+      "mAP50": 0.7772536775325944,
+      "mAP75": 0.45608337737326754,
+      "precision_at_maxF1": 0.7693751892697692,
+      "recall_at_maxF1": 0.7046558370349258,
+      "per_class": {
+        "fire": {
+          "AP50_95": 0.38640011816622716,
+          "AP50": 0.720634458648959,
+          "P": 0.7278926456910253,
+          "R": 0.633899864298167,
+          "F1": 0.6776524998376392
+        },
+        "smoke": {
+          "AP50_95": 0.5199293516018322,
+          "AP50": 0.83387289641623,
+          "P": 0.8108577328485131,
+          "R": 0.7754118097716847,
+          "F1": 0.7927387435767879
+        }
+      }
+    },
+    "dfire_leak_free": {
+      "mAP50_95": 0.44344100824962507,
+      "mAP50": 0.7558287752671378,
+      "mAP75": 0.4444480462217302,
+      "precision_at_maxF1": 0.7417967340757399,
+      "recall_at_maxF1": 0.6982337860357758,
+      "per_class": {
+        "fire": {
+          "AP50_95": 0.34551300751274233,
+          "AP50": 0.6774530636679772,
+          "P": 0.6753983421022738,
+          "R": 0.616840408289927,
+          "F1": 0.6447925957556409
+        },
+        "smoke": {
+          "AP50_95": 0.5413690089865075,
+          "AP50": 0.8342044868662982,
+          "P": 0.8081951260492058,
+          "R": 0.7796271637816246,
+          "F1": 0.793654148753644
+        }
+      }
+    },
+    "v1_roboflow_test": {
+      "mAP50_95": 0.2810455068643064,
+      "mAP50": 0.5417639207288097,
+      "mAP75": 0.25579326012634507,
+      "precision_at_maxF1": 0.572708488021471,
+      "recall_at_maxF1": 0.528750579697506,
+      "per_class": {
+        "fire": {
+          "AP50_95": 0.3560592767368135,
+          "AP50": 0.6701441661024794,
+          "P": 0.5999773141258572,
+          "R": 0.658247705085776,
+          "F1": 0.6277632126157007
+        },
+        "smoke": {
+          "AP50_95": 0.20603173699179936,
+          "AP50": 0.4133836753551401,
+          "P": 0.5454396619170847,
+          "R": 0.39925345430923603,
+          "F1": 0.46103579119441135
+        }
+      }
+    },
+    "v1_roboflow_test_leak_free": {
+      "mAP50_95": 0.2813428204752996,
+      "mAP50": 0.5444615498852643,
+      "mAP75": 0.25498786871539003,
+      "precision_at_maxF1": 0.5773875535726615,
+      "recall_at_maxF1": 0.5270223752151464,
+      "per_class": {
+        "fire": {
+          "AP50_95": 0.3525691970673335,
+          "AP50": 0.6682332741934258,
+          "P": 0.6023006465462276,
+          "R": 0.6540447504302926,
+          "F1": 0.6271071267540824
+        },
+        "smoke": {
+          "AP50_95": 0.21011644388326575,
+          "AP50": 0.4206898255771029,
+          "P": 0.5524744605990953,
+          "R": 0.4,
+          "F1": 0.46403298646063035
+        }
+      }
+    }
+  },
+  "operating_points": {
+    "dfire_official": {
+      "val_chosen_threshold": {
+        "threshold": 0.22,
+        "fire": {
+          "TP": 1990,
+          "FP": 864,
+          "FN": 888,
+          "precision": 0.6972669936930623,
+          "recall": 0.6914523974982627,
+          "F1": 0.6943475226796929,
+          "FNR": 0.3085476025017373,
+          "FDR": 0.3027330063069376
+        },
+        "smoke": {
+          "TP": 1852,
+          "FP": 478,
+          "FN": 459,
+          "precision": 0.7948497854077253,
+          "recall": 0.8013846819558632,
+          "F1": 0.7981038569273863,
+          "FNR": 0.1986153180441368,
+          "FDR": 0.20515021459227467
+        },
+        "macro_precision": 0.7460583895503938,
+        "macro_recall": 0.746418539727063,
+        "macro_F1": 0.7462256898035395,
+        "object_FNR": 0.2595875891308537,
+        "object_FDR": 0.25887345679012347,
+        "FPPI": 0.31165815141662795,
+        "frame_FPR": 0.023940149625935162,
+        "frame_FNR": 0.04302477183833116,
+        "frame_counts": {
+          "positive": 2301,
+          "negative": 2005
+        }
+      },
+      "sentinel_threshold": {
+        "threshold": 0.35,
+        "fire": {
+          "TP": 1671,
+          "FP": 392,
+          "FN": 1207,
+          "precision": 0.8099854580707707,
+          "recall": 0.5806115357887421,
+          "F1": 0.676381299332119,
+          "FNR": 0.41938846421125786,
+          "FDR": 0.19001454192922929
+        },
+        "smoke": {
+          "TP": 1724,
+          "FP": 279,
+          "FN": 587,
+          "precision": 0.8607089365951074,
+          "recall": 0.7459974037213327,
+          "F1": 0.7992582290217896,
+          "FNR": 0.2540025962786673,
+          "FDR": 0.13929106340489267
+        },
+        "macro_precision": 0.835347197332939,
+        "macro_recall": 0.6633044697550374,
+        "macro_F1": 0.7378197641769543,
+        "object_FNR": 0.3457313547889767,
+        "object_FDR": 0.16502705361534678,
+        "FPPI": 0.15582907570831397,
+        "frame_FPR": 0.00997506234413965,
+        "frame_FNR": 0.08735332464146023,
+        "frame_counts": {
+          "positive": 2301,
+          "negative": 2005
+        }
+      }
+    },
+    "dfire_leak_free": {
+      "val_chosen_threshold": {
+        "threshold": 0.22,
+        "fire": {
+          "TP": 1511,
+          "FP": 755,
+          "FN": 776,
+          "precision": 0.6668137687555163,
+          "recall": 0.6606908613904678,
+          "F1": 0.6637381945969691,
+          "FNR": 0.33930913860953216,
+          "FDR": 0.33318623124448365
+        },
+        "smoke": {
+          "TP": 1198,
+          "FP": 287,
+          "FN": 304,
+          "precision": 0.8067340067340067,
+          "recall": 0.7976031957390146,
+          "F1": 0.8021426180113826,
+          "FNR": 0.20239680426098539,
+          "FDR": 0.19326599326599325
+        },
+        "macro_precision": 0.7367738877447616,
+        "macro_recall": 0.7291470285647412,
+        "macro_F1": 0.7329404063041759,
+        "object_FNR": 0.2850356294536817,
+        "object_FDR": 0.2777925886430285,
+        "FPPI": 0.45403050108932463,
+        "frame_FPR": 0.015294117647058824,
+        "frame_FNR": 0.03183391003460208,
+        "frame_counts": {
+          "positive": 1445,
+          "negative": 850
+        }
+      },
+      "sentinel_threshold": {
+        "threshold": 0.35,
+        "fire": {
+          "TP": 1230,
+          "FP": 340,
+          "FN": 1057,
+          "precision": 0.7834394904458599,
+          "recall": 0.5378224748578925,
+          "F1": 0.6378014000518538,
+          "FNR": 0.4621775251421075,
+          "FDR": 0.21656050955414013
+        },
+        "smoke": {
+          "TP": 1113,
+          "FP": 174,
+          "FN": 389,
+          "precision": 0.8648018648018648,
+          "recall": 0.741011984021305,
+          "F1": 0.7981355324489063,
+          "FNR": 0.25898801597869503,
+          "FDR": 0.1351981351981352
+        },
+        "macro_precision": 0.8241206776238623,
+        "macro_recall": 0.6394172294395988,
+        "macro_F1": 0.71796846625038,
+        "object_FNR": 0.38163103721298497,
+        "object_FDR": 0.17990899544977249,
+        "FPPI": 0.22396514161220044,
+        "frame_FPR": 0.0058823529411764705,
+        "frame_FNR": 0.06920415224913495,
+        "frame_counts": {
+          "positive": 1445,
+          "negative": 850
+        }
+      }
+    },
+    "v1_roboflow_test": {
+      "val_chosen_threshold": {
+        "threshold": 0.22,
+        "fire": {
+          "TP": 1072,
+          "FP": 434,
+          "FN": 703,
+          "precision": 0.7118193891102258,
+          "recall": 0.603943661971831,
+          "F1": 0.6534593111856142,
+          "FNR": 0.396056338028169,
+          "FDR": 0.28818061088977426
+        },
+        "smoke": {
+          "TP": 187,
+          "FP": 109,
+          "FN": 366,
+          "precision": 0.6317567567567568,
+          "recall": 0.33815551537070526,
+          "F1": 0.4405182567726738,
+          "FNR": 0.6618444846292948,
+          "FDR": 0.36824324324324326
+        },
+        "macro_precision": 0.6717880729334913,
+        "macro_recall": 0.4710495886712681,
+        "macro_F1": 0.546988783979144,
+        "object_FNR": 0.45919243986254293,
+        "object_FDR": 0.3013318534961154,
+        "FPPI": 0.5349753694581281,
+        "frame_FPR": 0.0,
+        "frame_FNR": 0.026600985221674877,
+        "frame_counts": {
+          "positive": 1015,
+          "negative": 0
+        }
+      },
+      "sentinel_threshold": {
+        "threshold": 0.35,
+        "fire": {
+          "TP": 921,
+          "FP": 213,
+          "FN": 854,
+          "precision": 0.8121693121693122,
+          "recall": 0.5188732394366197,
+          "F1": 0.6332072877277415,
+          "FNR": 0.48112676056338033,
+          "FDR": 0.18783068783068782
+        },
+        "smoke": {
+          "TP": 133,
+          "FP": 60,
+          "FN": 420,
+          "precision": 0.689119170984456,
+          "recall": 0.24050632911392406,
+          "F1": 0.3565683646112601,
+          "FNR": 0.759493670886076,
+          "FDR": 0.31088082901554404
+        },
+        "macro_precision": 0.7506442415768841,
+        "macro_recall": 0.3796897842752719,
+        "macro_F1": 0.4948878261695008,
+        "object_FNR": 0.5472508591065293,
+        "object_FDR": 0.2057272042200452,
+        "FPPI": 0.2689655172413793,
+        "frame_FPR": 0.0,
+        "frame_FNR": 0.09458128078817735,
+        "frame_counts": {
+          "positive": 1015,
+          "negative": 0
+        }
+      }
+    },
+    "v1_roboflow_test_leak_free": {
+      "val_chosen_threshold": {
+        "threshold": 0.22,
+        "fire": {
+          "TP": 1049,
+          "FP": 428,
+          "FN": 694,
+          "precision": 0.7102234258632363,
+          "recall": 0.6018359150889271,
+          "F1": 0.6515527950310558,
+          "FNR": 0.3981640849110729,
+          "FDR": 0.2897765741367637
+        },
+        "smoke": {
+          "TP": 185,
+          "FP": 105,
+          "FN": 355,
+          "precision": 0.6379310344827587,
+          "recall": 0.3425925925925926,
+          "F1": 0.44578313253012053,
+          "FNR": 0.6574074074074074,
+          "FDR": 0.3620689655172414
+        },
+        "macro_precision": 0.6740772301729975,
+        "macro_recall": 0.4722142538407599,
+        "macro_F1": 0.5486679637805881,
+        "object_FNR": 0.45948313622426634,
+        "object_FDR": 0.30164119977362763,
+        "FPPI": 0.5346038114343029,
+        "frame_FPR": 0.0,
+        "frame_FNR": 0.02708124373119358,
+        "frame_counts": {
+          "positive": 997,
+          "negative": 0
+        }
+      },
+      "sentinel_threshold": {
+        "threshold": 0.35,
+        "fire": {
+          "TP": 900,
+          "FP": 209,
+          "FN": 843,
+          "precision": 0.8115419296663661,
+          "recall": 0.5163511187607573,
+          "F1": 0.6311360448807855,
+          "FNR": 0.48364888123924266,
+          "FDR": 0.1884580703336339
+        },
+        "smoke": {
+          "TP": 133,
+          "FP": 59,
+          "FN": 407,
+          "precision": 0.6927083333333334,
+          "recall": 0.2462962962962963,
+          "F1": 0.36338797814207646,
+          "FNR": 0.7537037037037038,
+          "FDR": 0.3072916666666667
+        },
+        "macro_precision": 0.7521251314998497,
+        "macro_recall": 0.38132370752852685,
+        "macro_F1": 0.49726201151143096,
+        "object_FNR": 0.5475251861585633,
+        "object_FDR": 0.20599538816295157,
+        "FPPI": 0.2688064192577733,
+        "frame_FPR": 0.0,
+        "frame_FNR": 0.09528585757271815,
+        "frame_counts": {
+          "positive": 997,
+          "negative": 0
+        }
+      }
+    }
+  },
+  "onnx": {
+    "640": {
+      "file": "fire_yolo11s_640.onnx",
+      "size_mb": 36.2,
+      "parity_with_ultralytics": "20/20",
+      "test_mAP50_95": 0.45316473488402964,
+      "test_mAP50": 0.7772536775325944,
+      "colab_cpu_latency_ms": {
+        "mean": 263.8293664133562,
+        "p50": 242.78614649983865,
+        "p95": 350.58541769988096
+      },
+      "colab_cpu_fps": 3.7903286263942437
+    },
+    "480": {
+      "file": "fire_yolo11s_480.onnx",
+      "size_mb": 36.1,
+      "parity_with_ultralytics": "20/20",
+      "test_mAP50_95": 0.44466412606546124,
+      "test_mAP50": 0.7601374001359149,
+      "colab_cpu_latency_ms": {
+        "mean": 171.93791209335964,
+        "p50": 140.14434149999033,
+        "p95": 226.14514140016104
+      },
+      "colab_cpu_fps": 5.816052945071331
+    },
+    "416": {
+      "file": "fire_yolo11s_416.onnx",
+      "size_mb": 36.1,
+      "parity_with_ultralytics": "20/20",
+      "test_mAP50_95": 0.4307539441776679,
+      "test_mAP50": 0.7383209285558723,
+      "colab_cpu_latency_ms": {
+        "mean": 118.38094091333915,
+        "p50": 104.297471000109,
+        "p95": 161.6826840499925
+      },
+      "colab_cpu_fps": 8.447305725776
+    }
+  },
+  "gpu_pytorch_fp16": {
+    "gpu": "Tesla T4",
+    "imgsz": 640,
+    "latency_ms": {
+      "mean": 11.594024663506003,
+      "p50": 10.458141000526666,
+      "p95": 17.440502899626143
+    },
+    "fps": 86.25132592202047,
+    "power_idle_w": 34.24322994652407,
+    "power_active_w": 47.67598351648352,
+    "energy_per_frame_mj": 552.7565287470156,
+    "detector_energy_per_frame_mj": 155.7396761889082
+  },
+  "notes": {
+    "frame_FPR": "share of fire/smoke-free frames with at least one detection (a box-level FPR is undefined for detectors)",
+    "leak_free": "test images with no perceptual-hash near-duplicate (Hamming <= 5) anywhere in train/val",
+    "v1_roboflow_test": "the test split of your two v1 Roboflow sets (never trained on); Roboflow train/val images that were near-copies of any test image were dropped from training",
+    "colab_cpu": "Colab's 2-vCPU CPU is not your laptop - run the benchmark on the laptop/Jetson for real numbers",
+    "power": "GPU board power from NVML on the Colab GPU; laptop/Jetson power must be measured on that device"
+  },
+  "recommended_confidence_threshold": 0.22,
+  "created": "2026-09-28 07:40"
+}
