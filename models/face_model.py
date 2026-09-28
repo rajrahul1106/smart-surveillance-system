@@ -1,17 +1,29 @@
-"""ArcFace-based face identity model (insightface buffalo_l).
+"""ArcFace multi-face identity model (insightface buffalo_l).
 
-Replaces the previous dlib/face_recognition pipeline. Uses one
-InsightFace ``FaceAnalysis`` app for both detection AND 512-d ArcFace
-embedding extraction, with cosine-similarity matching against
-enrolled encodings.
+One InsightFace ``FaceAnalysis`` app detects every face in the frame and
+extracts a 512-d ArcFace embedding for each.  All faces are matched against
+the enrolled encodings in one matrix multiply, and a :class:`FaceTracker`
+gives each person a stable track id plus an AUTHORIZED / UNCERTAIN / UNKNOWN
+status smoothed over time.
+
+Modes (see :meth:`FaceModel.set_mode`):
+
+- ``"verify"`` (VERIFYING_IDENTITY): centre crop + upscale, for long-range
+  authentication of the person doing the gesture.
+- ``"presence"`` (ACTIVE_DETECTION): the full frame, no crop, so people at
+  the frame edges are seen too.  ``DET_SIZE`` already upsamples small faces.
 
 Storage format::
 
     data/face_encodings.pkl  →  { name: [np.ndarray(512,), ...], ... }
 
-Predict return contract is unchanged for the rest of the pipeline:
-``user_id``, ``confidence``, ``is_live``, ``authorized``/``is_authorized``,
-``bbox`` (x, y, w, h tuple of ints).
+A person may have several enrolled samples; their score is the max over them.
+
+Predict return contract: the legacy single-face keys (``user_id``, ``name``,
+``label``, ``confidence``, ``is_live``, ``authorized``/``is_authorized``,
+``bbox`` (x, y, w, h tuple of ints), ``frame_size``) describe the best
+AUTHORIZED face, else the largest face.  ``faces`` lists every face seen in
+this frame and ``presence`` summarises who is in view.
 """
 
 from __future__ import annotations
@@ -19,14 +31,26 @@ from __future__ import annotations
 import logging
 import os
 import pickle
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
+from models.face_tracker import (
+    AUTHORIZED,
+    FaceDetection,
+    FaceTracker,
+    Track,
+    summarize_presence,
+)
 
 logger = logging.getLogger(__name__)
+
+MODE_VERIFY = "verify"
+MODE_PRESENCE = "presence"
 
 
 class FaceModel(BaseModel):
@@ -35,16 +59,12 @@ class FaceModel(BaseModel):
     ENCODINGS_PATH_DEFAULT = "data/face_encodings.pkl"
     MODEL_ROOT_DEFAULT = "data/model_artifacts"
 
-    # ArcFace cosine similarity authorization tiers.
+    # ArcFace cosine similarity tiers, applied to each track's smoothed score.
     # Display percentage = cosine * 100 (e.g. 0.68 → "68%").
     #
-    # > AUTHORIZE_THRESHOLD (0.60)        → is_authorized=True, "name"
-    # POSSIBLE_THRESHOLD .. AUTHORIZE     → is_authorized=False, "POSSIBLE: name"
-    # < POSSIBLE_THRESHOLD (0.40)         → is_authorized=False, "UNKNOWN"
-    #
-    # These thresholds match what an end-user reads on screen: a 60% match
-    # confidence is the floor for authorisation; 40-60% surfaces the
-    # candidate name as a possible match without granting access.
+    # >= AUTHORIZE_THRESHOLD (0.60)       → AUTHORIZED, "name"
+    # POSSIBLE_THRESHOLD .. AUTHORIZE     → legacy label "POSSIBLE: name"
+    # < UNKNOWN_THRESHOLD (0.30), held    → UNKNOWN (see FaceTracker)
     AUTHORIZE_THRESHOLD = 0.60
     POSSIBLE_THRESHOLD = 0.40
     # Legacy alias kept for backward compat with callers that pass
@@ -53,9 +73,32 @@ class FaceModel(BaseModel):
     MATCH_THRESHOLD = AUTHORIZE_THRESHOLD
     DET_SIZE = (960, 960)
 
-    # Centre-crop ratio for distance detection.  A 70 % crop gives ~1.43×
-    # zoom, making faces at 2-5 m large enough for reliable detection.
+    # Centre-crop ratio for verify mode.  A 70 % crop gives ~1.43× zoom,
+    # making faces at 2-5 m large enough for reliable detection.
     CROP_RATIO = 0.7
+
+    # Detector score threshold per mode: low in verify mode so the distant
+    # gesture-doer is still found; the library default in presence mode,
+    # where every false detection would become an UNKNOWN person.
+    VERIFY_DET_THRESH = 0.3
+    PRESENCE_DET_THRESH = 0.5
+
+    # Only the detector (bbox + 5-point kps) and ArcFace heads are used;
+    # skipping buffalo_l's landmark and gender/age heads saves ~30 ms per face.
+    INSIGHTFACE_MODULES = ("detection", "recognition")
+
+    # Multi-person tracking (status rules live in FaceTracker).
+    UNKNOWN_THRESHOLD = 0.30
+    EMA_ALPHA = 0.3
+    UNKNOWN_CONFIRM_FRAMES = 5
+    TRACK_MAX_MISSED = 10
+    MAX_FACES = 6
+
+    # ONNX Runtime intra-op threads for the insightface sessions in presence
+    # mode (0 = runtime default).  Capped via config so presence runs on the
+    # worker thread don't take every core from the fire model on the
+    # pipeline thread; verify mode always keeps the runtime default.
+    INTRA_OP_THREADS = 0
 
     def __init__(
         self,
@@ -63,22 +106,89 @@ class FaceModel(BaseModel):
         model_root: str = MODEL_ROOT_DEFAULT,
         match_threshold: float = MATCH_THRESHOLD,
         possible_threshold: float = POSSIBLE_THRESHOLD,
+        unknown_threshold: float = UNKNOWN_THRESHOLD,
+        ema_alpha: float = EMA_ALPHA,
+        unknown_confirm_frames: int = UNKNOWN_CONFIRM_FRAMES,
+        track_max_missed: int = TRACK_MAX_MISSED,
+        max_faces: int = MAX_FACES,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
         self._encodings_path = encodings_path
+        self._intra_op_threads = intra_op_threads
+        self._session_threads = 0  # cap the current insightface sessions use
         self._model_root = model_root
         self._authorize_threshold = match_threshold
         self._possible_threshold = possible_threshold
         # Legacy attribute name some tests may inspect.
         self._match_threshold = match_threshold
+        self._max_faces = max_faces
 
         self._app: Optional[Any] = None
         # { name: [np.ndarray(512,), ...] }
         self._known_encodings: Dict[str, List[np.ndarray]] = {}
-        # EMA smoothing for identity confidence
-        self._smoothed_confidence: Dict[str, float] = {}
-        self._confidence_alpha: float = 0.3
-        self._low_conf_streak: int = 0
+        self._tracker = FaceTracker(
+            auth_threshold=match_threshold,
+            unknown_threshold=unknown_threshold,
+            ema_alpha=ema_alpha,
+            unknown_confirm_frames=unknown_confirm_frames,
+            track_max_missed=track_max_missed,
+        )
+        self._mode = MODE_VERIFY
+        # Serialises predict with unload/set_mode: presence runs on a worker
+        # thread and the COOLDOWN transition unloads from a timer thread.
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Mode
+    # ------------------------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        """Switch between ``"verify"`` (centre crop) and ``"presence"`` (full frame).
+
+        Tracks are kept: both modes report boxes in original-frame pixels,
+        so the authenticated person keeps their track into presence mode.
+        """
+        if mode not in (MODE_VERIFY, MODE_PRESENCE):
+            raise ValueError(f"unknown face model mode: {mode!r}")
+        with self._lock:
+            self._mode = mode
+            self._apply_det_thresh()
+            self._apply_session_threads()
+
+    def _det_thresh(self) -> float:
+        return self.VERIFY_DET_THRESH if self._mode == MODE_VERIFY else self.PRESENCE_DET_THRESH
+
+    def _apply_det_thresh(self) -> None:
+        det_model = getattr(self._app, "det_model", None) if self._app is not None else None
+        if det_model is not None:
+            det_model.det_thresh = self._det_thresh()
+
+    def _apply_session_threads(self) -> None:
+        """Cap the insightface sessions' threads in presence mode only.
+
+        Presence runs on a worker thread alongside the fire model, so it gets
+        ``intra_op_threads``; verify mode is the only heavy work in
+        VERIFYING_IDENTITY and keeps the runtime default.  insightface only
+        forwards providers to its sessions, so they are rebuilt from the same
+        model files (~0.1 s).  Call with the lock held.
+        """
+        wanted = self._intra_op_threads if self._mode == MODE_PRESENCE else 0
+        if self._app is None or wanted == self._session_threads:
+            return
+        import onnxruntime as ort
+
+        options = session_options(wanted)
+        for model in self._app.models.values():
+            model.session = ort.InferenceSession(
+                model.model_file, sess_options=options,
+                providers=["CPUExecutionProvider"],
+            )
+        self._session_threads = wanted
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -89,35 +199,39 @@ class FaceModel(BaseModel):
 
         os.makedirs(self._model_root, exist_ok=True)
 
-        self._app = insightface.app.FaceAnalysis(
+        app = insightface.app.FaceAnalysis(
             name="buffalo_l",
             root=self._model_root,
+            allowed_modules=list(self.INSIGHTFACE_MODULES),
             providers=["CPUExecutionProvider"],
         )
-        self._app.prepare(ctx_id=-1, det_size=self.DET_SIZE)
-
-        # Lower the face-detection threshold so smaller / distant faces
-        # are picked up.  InsightFace stores it inside each detection
-        # sub-model; wrap in try/except for test-mock safety.
-        try:
-            for m in self._app.models:
-                if hasattr(m, "det_thresh"):
-                    m.det_thresh = 0.3
-        except Exception:
-            pass
+        app.prepare(ctx_id=-1, det_size=self.DET_SIZE, det_thresh=self._det_thresh())
+        with self._lock:
+            self._app = app
+            self._session_threads = 0  # insightface built them uncapped
+            self._apply_session_threads()
+            self._tracker.reset()
 
         self._load_encodings()
         logger.info(
-            "FaceModel ready — %d enrolled identit%s",
+            "FaceModel ready — %d enrolled identit%s, mode=%s, threads=%s",
             len(self._known_encodings),
             "y" if len(self._known_encodings) == 1 else "ies",
+            self._mode,
+            self._intra_op_threads or "default",
         )
 
     def _do_unload(self) -> None:
-        self._app = None
-        self._known_encodings = {}
-        self._smoothed_confidence = {}
-        self._low_conf_streak = 0
+        with self._lock:
+            self._app = None
+            self._session_threads = 0
+            self._known_encodings = {}
+            self._tracker.reset()
+            self._mode = MODE_VERIFY
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
 
     def _do_predict(self, frame: Any) -> Dict[str, Any]:
         if frame is None:
@@ -130,72 +244,100 @@ class FaceModel(BaseModel):
         h, w = bgr.shape[:2]
         frame_size = (int(w), int(h))
 
-        # Centre-crop + upscale so distant faces appear larger.
-        zoomed = self._prepare_frame_for_distance(bgr)
+        with self._lock:
+            if self._app is None:  # unloaded while this call was waiting
+                return _empty_result(frame_size)
 
-        # insightface expects BGR (which OpenCV provides natively).
-        faces = self._app.get(zoomed)
-        if not faces:
-            empty = _empty_result()
-            empty["frame_size"] = frame_size
-            return empty
+            verify = self._mode == MODE_VERIFY
+            image = self._prepare_frame_for_distance(bgr) if verify else bgr
+            # insightface expects BGR (which OpenCV provides natively).
+            faces = self._app.get(image)
+            # Largest faces first, capped so a crowd can't stall the pipeline.
+            faces = sorted(faces, key=_bbox_area, reverse=True)[: self._max_faces]
 
-        # Use the largest face by bounding-box area.
-        face = max(
-            faces,
-            key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+            boxes: List[Tuple[int, int, int, int]] = []
+            embeddings: List[np.ndarray] = []
+            for face in faces:
+                raw_bbox = face.bbox.tolist()
+                if verify:
+                    raw_bbox = self._remap_bbox(raw_bbox, w, h)
+                bbox = _clamp_xywh(raw_bbox, w, h)
+                if bbox[2] == 0 or bbox[3] == 0:
+                    continue
+                boxes.append(bbox)
+                embeddings.append(face.normed_embedding)
+
+            similarities = self._similarities(embeddings)
+            tracks = self._tracker.update([
+                FaceDetection(bbox=b, similarities=s) for b, s in zip(boxes, similarities)
+            ])
+            logger.debug(
+                "FaceModel %s: %d face(s) %s, input_frame=(%d,%d)",
+                self._mode, len(tracks),
+                [(t.track_id, t.status, t.identity) for t in tracks], w, h,
+            )
+            return self._build_result(tracks, frame_size)
+
+    def _build_result(
+        self, tracks: List[Track], frame_size: Tuple[int, int],
+    ) -> Dict[str, Any]:
+        if not tracks:
+            return _empty_result(frame_size)
+
+        faces = [self._face_entry(t) for t in tracks]
+        authorized = [t for t in tracks if t.status == AUTHORIZED]
+        if authorized:
+            primary = max(authorized, key=lambda t: t.confidence)
+        else:
+            primary = max(tracks, key=lambda t: t.bbox[2] * t.bbox[3])
+
+        result = self._legacy_fields(primary)
+        result.update(
+            bbox=primary.bbox,
+            frame_size=frame_size,
+            faces=faces,
+            presence=summarize_presence(faces),
         )
+        return result
 
-        # Remap bbox from the cropped-then-resized space back to the
-        # original frame coordinates.
-        raw_bbox = face.bbox.tolist()
-        raw_bbox = self._remap_bbox(raw_bbox, w, h)
-        x1, y1, x2, y2 = [int(round(v)) for v in raw_bbox]
-        x1 = max(0, min(x1, w)); y1 = max(0, min(y1, h))
-        x2 = max(0, min(x2, w)); y2 = max(0, min(y2, h))
-        bbox_xywh = (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
-        logger.debug(
-            "FaceModel bbox: raw=%s, clamped=(%d,%d,%d,%d), "
-            "xywh=%s, input_frame=(%d,%d)",
-            raw_bbox, x1, y1, x2, y2, bbox_xywh, w, h,
-        )
+    @staticmethod
+    def _face_entry(track: Track) -> Dict[str, Any]:
+        return {
+            "track_id": track.track_id,
+            "bbox": track.bbox,
+            "status": track.status,
+            "identity": track.identity if track.status == AUTHORIZED else None,
+            "confidence": round(track.confidence * 100.0, 1),
+            "auth_streak": track.auth_streak,
+        }
 
-        embedding = np.asarray(face.normed_embedding, dtype=np.float32)
-
-        best_name, best_score = self._match(embedding)
-        best_score = self._smooth_confidence(best_name, best_score)
-        is_authorized = best_score > self._authorize_threshold
+    def _legacy_fields(self, track: Track) -> Dict[str, Any]:
+        """Single-face keys the pre-tracking pipeline read, for one track."""
+        is_authorized = track.status == AUTHORIZED
+        best_name, best_score = track.best_match()
 
         # Three-tier label/identity assignment.
         if is_authorized:
-            label = best_name or "UNKNOWN"
-            user_id = best_name
-            name_field = best_name
-        elif best_score >= self._possible_threshold and best_name is not None:
+            label = user_id = name_field = track.identity
+        elif best_name is not None and best_score >= self._possible_threshold:
             # Strong-enough match to surface the candidate name, but not
             # confident enough to authorize.
-            label = f"POSSIBLE: {best_name}"
-            user_id = f"POSSIBLE: {best_name}"
-            name_field = label
+            label = user_id = name_field = f"POSSIBLE: {best_name}"
         else:
-            label = "UNKNOWN"
-            user_id = None
-            name_field = None
+            label, user_id, name_field = "UNKNOWN", None, None
 
         return {
             "user_id": user_id,
             "name": name_field,
             "label": label,
-            "confidence": float(best_score),
+            "confidence": float(track.confidence),
             "is_live": True,  # ArcFace + buffalo_l detector implies a real face crop
-            "authorized": bool(is_authorized),
-            "is_authorized": bool(is_authorized),
-            "bbox": bbox_xywh,
-            "frame_size": frame_size,
+            "authorized": is_authorized,
+            "is_authorized": is_authorized,
         }
 
     # ------------------------------------------------------------------
-    # Distance helpers (centre-crop + upscale)
+    # Distance helpers (verify mode: centre-crop + upscale)
     # ------------------------------------------------------------------
 
     def _prepare_frame_for_distance(self, frame: np.ndarray) -> np.ndarray:
@@ -236,52 +378,47 @@ class FaceModel(BaseModel):
     # Matching
     # ------------------------------------------------------------------
 
-    def _match(self, embedding: np.ndarray) -> Tuple[Optional[str], float]:
-        if not self._known_encodings:
-            return None, 0.0
+    def _similarities(self, embeddings: Sequence[np.ndarray]) -> List[Dict[str, float]]:
+        """Cosine similarity of each query face to every enrolled identity.
 
-        emb_norm = float(np.linalg.norm(embedding))
-        if emb_norm < 1e-8:
-            return None, 0.0
+        Queries ``(N, D)`` and enrolled samples ``(M, D)`` are L2-normalised
+        and compared in one ``Q @ E.T``; a person with several samples scores
+        the max over them.
+        """
+        if not embeddings:
+            return []
+        queries = _l2_normalize(np.stack([
+            np.asarray(e, dtype=np.float32).ravel() for e in embeddings
+        ]))
+        names, samples, owner = self._enrolled_matrix(queries.shape[1])
+        if not names:
+            return [{} for _ in embeddings]
 
-        best_name: Optional[str] = None
-        best_score: float = -1.0
+        sims = queries @ samples.T  # (N, M)
+        per_identity = np.stack(
+            [sims[:, owner == j].max(axis=1) for j in range(len(names))], axis=1,
+        )  # (N, identities)
+        return [dict(zip(names, row.tolist())) for row in per_identity]
 
-        for name, vectors in self._known_encodings.items():
-            for known in vectors:
-                known = np.asarray(known, dtype=np.float32)
-                k_norm = float(np.linalg.norm(known))
-                if k_norm < 1e-8:
-                    continue
-                # Cosine similarity. Embeddings are already L2-normalized
-                # by insightface, but recompute defensively.
-                score = float(np.dot(embedding, known) / (emb_norm * k_norm))
-                if score > best_score:
-                    best_score = score
-                    best_name = name
-
-        if best_score < 0:
-            best_score = 0.0
-        return best_name, best_score
-
-    def _smooth_confidence(self, name: Optional[str], raw: float) -> float:
-        if raw < 0.3:
-            self._low_conf_streak += 1
-            if self._low_conf_streak >= 5:
-                self._smoothed_confidence.clear()
-                self._low_conf_streak = 0
-            return raw
-        self._low_conf_streak = 0
-        if name is None:
-            return raw
-        if name not in self._smoothed_confidence:
-            self._smoothed_confidence[name] = raw
-        else:
-            self._smoothed_confidence[name] = (
-                (1.0 - self._confidence_alpha) * self._smoothed_confidence[name]
-                + self._confidence_alpha * raw
-            )
-        return self._smoothed_confidence[name]
+    def _enrolled_matrix(self, dim: int) -> Tuple[List[str], np.ndarray, np.ndarray]:
+        """Stack usable enrolled samples: (names, samples (M, dim), owner index per row)."""
+        names: List[str] = []
+        rows: List[np.ndarray] = []
+        owner: List[int] = []
+        # Snapshot: EnrollmentService may add identities from another thread.
+        for name, vectors in list(self._known_encodings.items()):
+            usable = [
+                v for v in (np.asarray(v, dtype=np.float32).ravel() for v in vectors)
+                if v.shape[0] == dim and float(np.linalg.norm(v)) > 1e-8
+            ]
+            if not usable:
+                continue
+            owner.extend([len(names)] * len(usable))
+            names.append(name)
+            rows.extend(usable)
+        if not names:
+            return [], np.empty((0, dim), dtype=np.float32), np.empty(0, dtype=int)
+        return names, _l2_normalize(np.stack(rows)), np.asarray(owner)
 
     # ------------------------------------------------------------------
     # Enrollment helpers (used by EnrollmentService and CLI scripts)
@@ -364,8 +501,24 @@ class FaceModel(BaseModel):
         self._known_encodings = {}
 
 
-def _empty_result() -> Dict[str, Any]:
-    return {
+def _bbox_area(face: Any) -> float:
+    return float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
+
+
+def _clamp_xywh(bbox: List[float], w: int, h: int) -> Tuple[int, int, int, int]:
+    """(x1, y1, x2, y2) floats → (x, y, w, h) ints clamped to the frame."""
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    x1 = max(0, min(x1, w)); y1 = max(0, min(y1, h))
+    x2 = max(0, min(x2, w)); y2 = max(0, min(y2, h))
+    return (x1, y1, max(0, x2 - x1), max(0, y2 - y1))
+
+
+def _l2_normalize(m: np.ndarray) -> np.ndarray:
+    return m / np.maximum(np.linalg.norm(m, axis=1, keepdims=True), 1e-8)
+
+
+def _empty_result(frame_size: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
         "user_id": None,
         "name": None,
         "confidence": 0.0,
@@ -373,4 +526,9 @@ def _empty_result() -> Dict[str, Any]:
         "authorized": False,
         "is_authorized": False,
         "bbox": None,
+        "faces": [],
+        "presence": summarize_presence([]),
     }
+    if frame_size is not None:
+        result["frame_size"] = frame_size
+    return result

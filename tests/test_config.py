@@ -12,11 +12,13 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from core.config import (
+    ActivityConfig,
     AppConfig,
     AlertsConfig,
     CameraConfig,
     DetectionConfig,
     FaceAuthConfig,
+    FireConfig,
     FrameConfig,
     GestureConfig,
     LoggingConfig,
@@ -221,6 +223,38 @@ camera:
         with pytest.raises(ValueError, match="detection.cooldown_seconds"):
             cfg.validate()
 
+    def test_unknown_threshold_above_auth_threshold(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(auth_threshold=0.5, unknown_threshold=0.6))
+        with pytest.raises(ValueError, match="face_auth thresholds"):
+            cfg.validate()
+
+    def test_ema_alpha_zero(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(ema_alpha=0.0))
+        with pytest.raises(ValueError, match="face_auth.ema_alpha"):
+            cfg.validate()
+
+    def test_presence_interval_zero(self):
+        cfg = AppConfig(face_auth=FaceAuthConfig(presence_interval_frames=0))
+        with pytest.raises(ValueError, match="face_auth.presence_interval_frames"):
+            cfg.validate()
+
+    def test_fire_score_cap_below_threshold(self):
+        cfg = AppConfig(fire=FireConfig(score_threshold=3.0, score_cap=2.0))
+        with pytest.raises(ValueError, match="fire.score_cap"):
+            cfg.validate()
+
+    def test_activity_validation(self):
+        with pytest.raises(ValueError, match="activity.score_cap"):
+            AppConfig(activity=ActivityConfig(score_threshold=3.0, score_cap=2.0)).validate()
+        with pytest.raises(ValueError, match="activity.intra_op_threads"):
+            AppConfig(activity=ActivityConfig(intra_op_threads=-1)).validate()
+
+    def test_negative_intra_op_threads(self):
+        with pytest.raises(ValueError, match="fire.intra_op_threads"):
+            AppConfig(fire=FireConfig(intra_op_threads=-1)).validate()
+        with pytest.raises(ValueError, match="face_auth.intra_op_threads"):
+            AppConfig(face_auth=FaceAuthConfig(intra_op_threads=-1)).validate()
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -237,6 +271,76 @@ class TestDefaults:
     def test_alerts_config_dry_run_defaults_true(self):
         cfg = AlertsConfig()
         assert cfg.dry_run is True
+
+    def test_face_auth_defaults_match_face_model_constants(self):
+        from models.face_model import FaceModel
+
+        cfg = FaceAuthConfig()
+        assert cfg.auth_threshold == FaceModel.AUTHORIZE_THRESHOLD
+        assert cfg.unknown_threshold == FaceModel.UNKNOWN_THRESHOLD
+        assert cfg.ema_alpha == FaceModel.EMA_ALPHA
+        assert cfg.unknown_confirm_frames == FaceModel.UNKNOWN_CONFIRM_FRAMES
+        assert cfg.track_max_missed == FaceModel.TRACK_MAX_MISSED
+        assert cfg.max_faces == FaceModel.MAX_FACES
+        assert cfg.presence_interval_frames == 10
+        assert cfg.intra_op_threads == FaceModel.INTRA_OP_THREADS
+
+    def test_repo_config_loads_multi_person_face_keys(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.face_auth.auth_threshold == 0.60
+        assert cfg.face_auth.unknown_threshold == 0.30
+        assert cfg.face_auth.ema_alpha == 0.3
+        assert cfg.face_auth.unknown_confirm_frames == 5
+        assert cfg.face_auth.track_max_missed == 10
+        assert cfg.face_auth.presence_interval_frames == 10
+        assert cfg.face_auth.max_faces == 6
+
+    def test_fire_defaults_match_fire_model(self):
+        from models.fire_model import FireModel
+
+        cfg = FireConfig()
+        assert cfg.model_path == FireModel.MODEL_PATH
+        assert cfg.labels_path == FireModel.LABELS_PATH
+        assert cfg.confidence_threshold == FireModel.CONFIDENCE_THRESHOLD
+        assert cfg.iou_threshold == FireModel.IOU_THRESHOLD
+        assert cfg.input_size == FireModel.INPUT_SIZE
+        assert cfg.score_threshold == FireModel.SCORE_THRESHOLD
+        assert cfg.score_cap == FireModel.SCORE_CAP
+        assert cfg.intra_op_threads == FireModel.INTRA_OP_THREADS
+
+    def test_repo_config_uses_yolo11s_at_conf_035(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.fire.model_path.endswith("fire_yolo11s_480.onnx")
+        assert cfg.fire.labels_path.endswith("fire_yolo11s_labels.json")
+        assert cfg.fire.confidence_threshold == 0.35
+        assert cfg.fire.input_size == 480
+
+    def test_activity_defaults_match_activity_model(self):
+        from models.activity_model import ActivityModel
+
+        cfg = ActivityConfig()
+        assert cfg.model_path == ActivityModel.MODEL_PATH
+        assert cfg.label_map_path == ActivityModel.LABEL_MAP_PATH
+        assert cfg.confidence_threshold == ActivityModel.CONFIDENCE_THRESHOLD
+        assert cfg.score_threshold == ActivityModel.SCORE_THRESHOLD
+        assert cfg.score_cap == ActivityModel.SCORE_CAP
+        assert cfg.intra_op_threads == ActivityModel.INTRA_OP_THREADS
+
+    def test_repo_config_loads_activity_section(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.activity.model_path.endswith("sentinel_activity_mnv3.onnx")
+        assert cfg.activity.label_map_path.endswith("activity_label_map.json")
+        assert cfg.activity.confidence_threshold == 0.60
+        assert cfg.activity.score_threshold == 3.0
+        assert cfg.activity.score_cap == 10.0
+        assert cfg.activity.intra_op_threads == 1
+
+    def test_repo_config_caps_onnx_threads(self):
+        # Measured on the M2: fire 4 / face 1 keeps ACTIVE_DETECTION at 30 FPS
+        # with no backlog while the face presence worker runs.
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.fire.intra_op_threads == 4
+        assert cfg.face_auth.intra_op_threads == 1
 
     def test_app_config_all_sections_populated(self):
         cfg = AppConfig()

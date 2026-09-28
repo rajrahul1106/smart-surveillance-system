@@ -1,28 +1,33 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
 
 logger = logging.getLogger(__name__)
 
 
 class FireModel(BaseModel):
-    """YOLOv8n-based fire and smoke detection via ONNX Runtime.
+    """YOLO11s fire and smoke detection via ONNX Runtime.
 
-    Replaces the former HSV colour-masking approach with a proper neural
-    network trained on fire/smoke imagery.  The leaky-accumulator temporal
-    verification is retained so a single stray frame cannot trigger an alert.
+    A YOLO11s detector trained on D-Fire (including ~9,800 fire-free images
+    such as lamps and sun glare) plus two Roboflow fire/smoke sets, exported
+    as a static 480×480 ONNX graph.  The leaky-accumulator temporal
+    verification means a single stray frame cannot trigger an alert.
 
-    The ONNX model is produced once by ``scripts/train_fire_model.py`` and
-    loaded at runtime through ``onnxruntime``.  If the model file is absent
-    the detector degrades gracefully (every frame returns *not detected*).
+    Input size, class names and architecture are read from the ONNX file at
+    load time; the graph is authoritative over config and the labels JSON.
+    If the model file is absent the detector degrades gracefully (every
+    frame returns *not detected*).
 
     Severity mapping:
         - ``confidence >= 60 %``   -> area-based severity
@@ -30,15 +35,21 @@ class FireModel(BaseModel):
         - below 25 %               -> not reported
     """
 
-    # -- Model artefact path ------------------------------------------------
+    # -- Model artefact paths -----------------------------------------------
     MODEL_PATH = os.path.join(
-        "data", "model_artifacts", "models", "fire_yolov8n.onnx",
+        "data", "model_artifacts", "models", "fire_yolo11s_480.onnx",
+    )
+    LABELS_PATH = os.path.join(
+        "data", "model_artifacts", "models", "fire_yolo11s_labels.json",
     )
 
     # -- YOLO inference parameters ------------------------------------------
-    INPUT_SIZE = 416
+    INPUT_SIZE = 480
     CONFIDENCE_THRESHOLD = 0.35
     IOU_THRESHOLD = 0.45
+    # ONNX Runtime intra-op threads (0 = runtime default).  Capped via config
+    # so fire and face presence inference don't fight over the same cores.
+    INTRA_OP_THREADS = 0
 
     # -- Leaky accumulator (same concept as before) -------------------------
     BOOST_RATE = 1.0        # fire detection  -> strong boost
@@ -70,9 +81,13 @@ class FireModel(BaseModel):
         input_size: int = INPUT_SIZE,
         score_threshold: float = SCORE_THRESHOLD,
         score_cap: float = SCORE_CAP,
+        labels_path: Optional[str] = None,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
         self._model_path = model_path or self.MODEL_PATH
+        self._labels_path = labels_path or self.LABELS_PATH
+        self._intra_op_threads = intra_op_threads
         self._conf_threshold = confidence_threshold
         self._iou_threshold = iou_threshold
         self._input_size = input_size
@@ -95,7 +110,8 @@ class FireModel(BaseModel):
         if not os.path.isfile(self._model_path):
             logger.error(
                 "Fire ONNX model not found at %s — detection disabled.  "
-                "Run 'python scripts/train_fire_model.py' to train and export.",
+                "Place fire_yolo11s_480.onnx and fire_yolo11s_labels.json "
+                "in data/model_artifacts/models/.",
                 self._model_path,
             )
             self._session = None
@@ -105,6 +121,7 @@ class FireModel(BaseModel):
 
         self._session = ort.InferenceSession(
             self._model_path,
+            sess_options=session_options(self._intra_op_threads),
             providers=["CPUExecutionProvider"],
         )
         model_input = self._session.get_inputs()[0]
@@ -127,22 +144,46 @@ class FireModel(BaseModel):
 
         # Read class names embedded in the model metadata (Ultralytics
         # stores them as ``{"0": "fire", "1": "smoke", ...}``).
-        meta = self._session.get_modelmeta()
-        if meta.custom_metadata_map and "names" in meta.custom_metadata_map:
+        metadata = self._session.get_modelmeta().custom_metadata_map or {}
+        if "names" in metadata:
             try:
-                raw = ast.literal_eval(meta.custom_metadata_map["names"])
+                raw = ast.literal_eval(metadata["names"])
                 self._class_names = {int(k): v for k, v in raw.items()}
             except Exception:
                 pass  # keep defaults
 
         names_list = [self._class_names.get(i, "?") for i in sorted(self._class_names)]
+        self._check_labels_file(names_list)
         logger.info(
-            "FireModel loaded — YOLOv8n ONNX, input=%s (name=%s), "
-            "classes=%s, conf=%.2f, iou=%.2f, trigger=%.1f",
-            input_shape, self._input_name,
-            names_list, self._conf_threshold,
-            self._iou_threshold, self._score_threshold,
+            "FireModel loaded - %s ONNX, input=[%s], classes=[%s], "
+            "conf=%.2f, iou=%.2f, trigger=%.1f, threads=%s",
+            _architecture(metadata),
+            ",".join(str(d) for d in input_shape),
+            ",".join(repr(n) for n in names_list),
+            self._conf_threshold, self._iou_threshold, self._score_threshold,
+            self._intra_op_threads or "default",
         )
+
+    def _check_labels_file(self, onnx_classes: List[str]) -> None:
+        """Warn if the labels JSON disagrees with the ONNX metadata, which wins."""
+        if not os.path.isfile(self._labels_path):
+            logger.debug("No fire labels file at %s", self._labels_path)
+            return
+        try:
+            with open(self._labels_path) as f:
+                classes = json.load(f).get("classes")
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.warning(
+                "Fire labels file %s is unreadable (%s); using the ONNX metadata",
+                self._labels_path, exc,
+            )
+            return
+        if classes is not None and list(classes) != list(onnx_classes):
+            logger.warning(
+                "Fire labels file %s lists classes %s but the ONNX metadata "
+                "says %s; using the ONNX metadata",
+                self._labels_path, classes, onnx_classes,
+            )
 
     def _do_unload(self) -> None:
         self._fire_score = 0.0
@@ -160,13 +201,16 @@ class FireModel(BaseModel):
         frame_size = (int(w), int(h))
         self._frame_count += 1
 
+        # Local reference: the COOLDOWN transition unloads from a timer
+        # thread and may clear self._session while this call is running.
+        session = self._session
         # If ONNX model was never loaded, return a safe "nothing detected".
-        if self._session is None:
+        if session is None:
             return self._empty_result(frame_size)
 
         # Preprocess → infer → postprocess
         blob, ratio, pad = self._preprocess(frame)
-        raw_output = self._session.run(None, {self._input_name: blob})
+        raw_output = session.run(None, {self._input_name: blob})
         detections = self._postprocess(raw_output, ratio, pad, frame.shape)
 
         # Separate fire vs smoke detections
@@ -240,7 +284,7 @@ class FireModel(BaseModel):
     def _preprocess(
         self, frame: np.ndarray,
     ) -> Tuple[np.ndarray, float, Tuple[float, float]]:
-        """Letterbox-resize *frame* and normalise for YOLOv8 inference.
+        """Letterbox-resize *frame* and normalise for YOLO inference.
 
         Returns ``(blob, ratio, (pad_w, pad_h))``.
         """
@@ -297,7 +341,7 @@ class FireModel(BaseModel):
         pad: Tuple[float, float],
         original_shape: Tuple[int, ...],
     ) -> List[Dict[str, Any]]:
-        """Decode YOLOv8 ONNX output into a list of detection dicts.
+        """Decode YOLO ONNX output ``(1, 4 + classes, N)`` into detection dicts.
 
         Each dict: ``{"bbox": (x1,y1,x2,y2), "confidence": float,
                       "class_id": int, "class_name": str}``
@@ -415,3 +459,9 @@ class FireModel(BaseModel):
             "fire_score": 0.0,
             "fire_type": None,
         }
+
+
+def _architecture(metadata: Dict[str, str]) -> str:
+    """Model family from Ultralytics metadata, e.g. "YOLO11s" (else "YOLO")."""
+    match = re.search(r"\b(YOLO[\w.-]*)", metadata.get("description", ""))
+    return match.group(1) if match else "YOLO"

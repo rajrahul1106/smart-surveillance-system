@@ -74,6 +74,9 @@ class Pipeline:
     def _on_processed_frame(self, event: ProcessedFrame) -> None:
         frame = event.frame
         original = event.original_frame if event.original_frame is not None else frame
+        # States that run the face model use the full-resolution frame
+        # (enrollment embeddings are taken from it too).
+        self._context["original_frame"] = original
         current = self._state_registry[self._state_machine.state]
         trigger = current.on_frame(frame, self._context)
 

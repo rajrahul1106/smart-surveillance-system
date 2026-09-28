@@ -1,7 +1,15 @@
 """
+SUPERSEDED — kept for reference only.
+
+The fire model in use is ``fire_yolo11s_480.onnx`` (YOLO11s, 480×480, fire +
+smoke), trained in the D-Fire YOLO11s Colab notebook on D-Fire plus the two
+Roboflow fire/smoke datasets.  This script trains the older Roboflow-only
+model (archived as ``data/model_artifacts/archive/fire_yolo11n_416_v1.onnx``);
+the file it exports is no longer loaded by the app.
+
 One-time script to train YOLOv8n on a fire/smoke dataset and export to ONNX.
 
-The resulting ONNX model is used at runtime by ``models/fire_model.py``
+The resulting ONNX model was used at runtime by ``models/fire_model.py``
 via onnxruntime (no ultralytics dependency required at inference time).
 
 Usage

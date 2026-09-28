@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,10 @@ class ActivityModel(BaseModel):
     # Every class except this one counts as suspicious
     NORMAL_CLASS = "normal"
 
+    # ONNX Runtime intra-op threads (0 = runtime default).  Capped via config
+    # so it doesn't compete with the fire and face presence sessions.
+    INTRA_OP_THREADS = 0
+
     DEBUG_LOG_EVERY_N_FRAMES = 10
 
     # -----------------------------------------------------------------------
@@ -67,14 +72,10 @@ class ActivityModel(BaseModel):
         confidence_threshold: float = CONFIDENCE_THRESHOLD,
         score_threshold: float = SCORE_THRESHOLD,
         score_cap: float = SCORE_CAP,
-        **kwargs: Any,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
-        # main.py still passes the HOG-era loitering_* settings; accept and
-        # ignore them so construction keeps working.
-        if kwargs:
-            logger.debug("ActivityModel ignoring unused kwargs: %s", sorted(kwargs))
-
+        self._intra_op_threads = intra_op_threads
         self._model_path = model_path or self.MODEL_PATH
         self._label_map_path = label_map_path or self.LABEL_MAP_PATH
         self._conf_threshold = confidence_threshold
@@ -116,6 +117,7 @@ class ActivityModel(BaseModel):
 
         self._session = ort.InferenceSession(
             self._model_path,
+            sess_options=session_options(self._intra_op_threads),
             providers=["CPUExecutionProvider"],
         )
 
@@ -134,9 +136,10 @@ class ActivityModel(BaseModel):
 
         logger.info(
             "ActivityModel loaded - MobileNetV3 ONNX, classes=%s, size=%d, "
-            "conf=%.2f, trigger=%.1f, input=%s",
+            "conf=%.2f, trigger=%.1f, input=%s, threads=%s",
             self._classes, self._img_size, self._conf_threshold,
             self._score_threshold, self._input_name,
+            self._intra_op_threads or "default",
         )
 
     def _do_unload(self) -> None:

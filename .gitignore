@@ -58,25 +58,20 @@ coverage.xml
 
 # Alembic - keep versions/ but ignore generated stamps
 alembic/versions/__pycache__/
+
+# Runtime data and datasets
 data/near_miss_dataset/
-runs/
 data/fire_dataset/
-data/near_miss_dataset/
 data/known_faces/
-data/model_artifacts/
+# SQLite database plus its WAL-mode sidecars (events.db-shm, events.db-wal)
+data/events.db*
 runs/
 *.zip
 *.npy
 *.task
-*.onnx
 *.pkl
-data/fire_dataset/
-data/near_miss_dataset/
-data/known_faces/
-data/model_artifacts/
-runs/
-*.zip
-*.npy
-*.task
-*.onnx
-*.pkl
+
+# Model artifacts: weights stay out of git (*.onnx / *.pt above, *.zip /
+# *.task here); the small label and metrics JSON files may be committed.
+data/model_artifacts/archive/
+data/model_artifacts/training/*.pt

@@ -365,18 +365,237 @@ class TestFaceModel:
             assert model._app is None
 
 
+_ENROLLED = np.ones(512, dtype=np.float32) / np.sqrt(512)
+# Orthogonal to _ENROLLED (cosine similarity 0): a stranger.
+_STRANGER = np.array([1.0, -1.0] * 256, dtype=np.float32) / np.sqrt(512)
+
+
+def _face_model_with(faces=(), **kwargs):
+    """A loaded FaceModel whose mocked insightface app returns *faces*.
+
+    Uses a missing encodings file so real enrollments never leak in.
+    """
+    with patch.dict("sys.modules", _mock_insightface(faces=list(faces))):
+        model = FaceModel(encodings_path="/nonexistent/enc.pkl", **kwargs)
+        model.load()
+    return model
+
+
+class TestFaceModelMultiFace:
+    def test_enrolled_face_authorized_and_stranger_unknown(self):
+        model = _face_model_with([
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+            _fake_face(bbox=(400, 60, 500, 180), embedding=_STRANGER),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        first = {f["bbox"]: f for f in model.predict(_dummy_frame())["faces"]}
+        rahul, stranger = first[(40, 60, 100, 120)], first[(400, 60, 100, 120)]
+        assert rahul["status"] == "AUTHORIZED"
+        assert rahul["identity"] == "Rahul Raj"
+        assert stranger["status"] == "UNCERTAIN"
+        assert stranger["identity"] is None
+
+        for _ in range(FaceModel.UNKNOWN_CONFIRM_FRAMES - 1):
+            result = model.predict(_dummy_frame())
+        faces = {f["track_id"]: f for f in result["faces"]}
+        assert faces[rahul["track_id"]]["status"] == "AUTHORIZED"
+        assert faces[rahul["track_id"]]["identity"] == "Rahul Raj"
+        assert faces[rahul["track_id"]]["confidence"] == pytest.approx(100.0, abs=0.1)
+        assert faces[stranger["track_id"]]["status"] == "UNKNOWN"
+        assert faces[stranger["track_id"]]["identity"] is None
+        model.unload()
+
+    def test_presence_counts_with_zero_one_and_three_faces(self):
+        model = _face_model_with([])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": [], "unknown_count": 0, "uncertain_count": 0, "total": 0,
+        }
+
+        model._app.get.return_value = [_fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED)]
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": ["Rahul Raj"], "unknown_count": 0, "uncertain_count": 0, "total": 1,
+        }
+
+        model._app.get.return_value = [
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+            _fake_face(bbox=(250, 60, 350, 180), embedding=_STRANGER),
+            _fake_face(bbox=(450, 60, 550, 180), embedding=_STRANGER),
+        ]
+        assert model.predict(_dummy_frame())["presence"] == {
+            "authorized": ["Rahul Raj"], "unknown_count": 0, "uncertain_count": 2, "total": 3,
+        }
+        for _ in range(FaceModel.UNKNOWN_CONFIRM_FRAMES - 1):
+            presence = model.predict(_dummy_frame())["presence"]
+        assert presence == {
+            "authorized": ["Rahul Raj"], "unknown_count": 2, "uncertain_count": 0, "total": 3,
+        }
+        model.unload()
+
+    def test_top_level_keys_describe_the_authorized_face(self):
+        # The stranger is the larger face; the legacy keys must still
+        # describe the AUTHORIZED one.
+        model = _face_model_with([
+            _fake_face(bbox=(300, 50, 600, 400), embedding=_STRANGER),
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_ENROLLED),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        result = model.predict(_dummy_frame())
+        for key in ("user_id", "name", "label", "confidence", "is_live",
+                    "authorized", "is_authorized", "bbox", "frame_size"):
+            assert key in result, f"Missing key: {key}"
+        assert result["user_id"] == "Rahul Raj"
+        assert result["name"] == "Rahul Raj"
+        assert result["label"] == "Rahul Raj"
+        assert result["authorized"] is True
+        assert result["is_authorized"] is True
+        assert result["is_live"] is True
+        assert result["confidence"] == pytest.approx(1.0, abs=1e-3)
+        assert result["bbox"] == (40, 60, 100, 120)
+        assert result["frame_size"] == (640, 480)
+        model.unload()
+
+    def test_top_level_keys_fall_back_to_the_largest_face(self):
+        model = _face_model_with([
+            _fake_face(bbox=(40, 60, 140, 180), embedding=_STRANGER),
+            _fake_face(bbox=(300, 50, 600, 400), embedding=_STRANGER),
+        ])
+        model.set_mode("presence")
+        model.add_encoding("Rahul Raj", _ENROLLED)
+
+        result = model.predict(_dummy_frame())
+        assert result["is_authorized"] is False
+        assert result["user_id"] is None
+        assert result["label"] == "UNKNOWN"
+        assert result["bbox"] == (300, 50, 300, 350)
+        model.unload()
+
+    def test_person_score_is_the_max_over_their_samples(self):
+        model = _face_model_with([_fake_face(embedding=_ENROLLED)])
+        model.add_encoding("Rahul Raj", _STRANGER)   # a poor sample
+        model.add_encoding("Rahul Raj", _ENROLLED)   # a good sample
+
+        face = model.predict(_dummy_frame())["faces"][0]
+        assert face["status"] == "AUTHORIZED"
+        assert face["identity"] == "Rahul Raj"
+        assert face["confidence"] == pytest.approx(100.0, abs=0.1)
+        model.unload()
+
+    def test_presence_mode_uses_full_frame_and_verify_mode_crops(self):
+        model = _face_model_with([_fake_face(bbox=(100, 100, 200, 200))])
+        frame = np.random.default_rng(0).integers(0, 255, (480, 640, 3), dtype=np.uint8)
+
+        assert model.mode == "verify"
+        assert model.predict(frame)["bbox"] == (166, 142, 70, 70)  # remapped out of the crop
+        assert not np.array_equal(model._app.get.call_args[0][0], frame)
+
+        model.set_mode("presence")
+        assert model.predict(frame)["bbox"] == (100, 100, 100, 100)  # full frame, no remap
+        np.testing.assert_array_equal(model._app.get.call_args[0][0], frame)
+        model.unload()
+
+    def test_caps_at_max_faces_keeping_the_largest(self):
+        # Eight non-overlapping faces, widths 20, 25, ..., 55 px.
+        faces = [
+            _fake_face(bbox=(i * 75, 10, i * 75 + 20 + 5 * i, 30 + 5 * i))
+            for i in range(8)
+        ]
+        model = _face_model_with(faces, max_faces=6)
+        model.set_mode("presence")
+
+        result = model.predict(_dummy_frame())
+        assert len(result["faces"]) == 6
+        assert sorted(f["bbox"][2] for f in result["faces"]) == [30, 35, 40, 45, 50, 55]
+        model.unload()
+
+    def test_loads_only_needed_modules_and_sets_det_thresh_per_mode(self):
+        modules = _mock_insightface()
+        with patch.dict("sys.modules", modules):
+            model = FaceModel(encodings_path="/nonexistent/enc.pkl")
+            model.load()
+
+        kwargs = modules["insightface.app"].FaceAnalysis.call_args.kwargs
+        assert kwargs["allowed_modules"] == ["detection", "recognition"]
+        prepare = model._app.prepare.call_args.kwargs
+        assert prepare["det_size"] == (960, 960)
+        assert prepare["det_thresh"] == FaceModel.VERIFY_DET_THRESH
+
+        model.set_mode("presence")
+        assert model._app.det_model.det_thresh == FaceModel.PRESENCE_DET_THRESH
+        model.set_mode("verify")
+        assert model._app.det_model.det_thresh == FaceModel.VERIFY_DET_THRESH
+        with pytest.raises(ValueError):
+            model.set_mode("crowd")
+        model.unload()
+
+    def test_unload_resets_tracks_and_mode(self):
+        model = _face_model_with([_fake_face()])
+        model.set_mode("presence")
+        model.predict(_dummy_frame())
+        assert model._tracker.tracks
+
+        model.unload()
+        assert model._tracker.tracks == []
+        assert model.mode == "verify"
+
+    def test_thread_cap_applies_in_presence_mode_only(self):
+        # insightface only forwards providers to its sessions, so the cap is
+        # applied by rebuilding them; verify mode keeps the runtime default.
+        model = _face_model_with([], intra_op_threads=1)
+        det = MagicMock(model_file="det_10g.onnx")
+        rec = MagicMock(model_file="w600k_r50.onnx")
+        model._app.models = {"detection": det, "recognition": rec}
+
+        def fake_session(path, sess_options, providers):
+            return (path, sess_options.intra_op_num_threads)
+
+        with patch("onnxruntime.InferenceSession", side_effect=fake_session) as ctor:
+            model.set_mode("presence")
+            assert det.session == ("det_10g.onnx", 1)
+            assert rec.session == ("w600k_r50.onnx", 1)
+            model.set_mode("presence")  # already capped: no rebuild
+            assert ctor.call_count == 2
+            model.set_mode("verify")    # back to the runtime default
+            assert det.session == ("det_10g.onnx", 0)
+            assert rec.session == ("w600k_r50.onnx", 0)
+        model.unload()
+
+    def test_no_thread_cap_leaves_insightface_sessions_alone(self):
+        model = _face_model_with([])
+        model._app.models = {"detection": MagicMock(model_file="det_10g.onnx")}
+        with patch("onnxruntime.InferenceSession") as ctor:
+            model.set_mode("presence")
+        ctor.assert_not_called()
+        model.unload()
+
+
 # ---------------------------------------------------------------------------
-# FireModel (YOLOv8n ONNX)
+# FireModel (YOLO11s ONNX)
 # ---------------------------------------------------------------------------
+
+_REAL_FIRE_MODEL = os.path.join(
+    _project_root, "data", "model_artifacts", "models", "fire_yolo11s_480.onnx",
+)
+requires_real_fire_model = pytest.mark.skipif(
+    not os.path.isfile(_REAL_FIRE_MODEL), reason="fire_yolo11s_480.onnx not present",
+)
+
 
 def _yolo_fire_output(
-    cx: float = 320, cy: float = 320,
-    w: float = 320, h: float = 320,
+    cx: float = 240, cy: float = 240,
+    w: float = 240, h: float = 240,
     fire_conf: float = 0.9, smoke_conf: float = 0.01,
 ) -> np.ndarray:
-    """Create a synthetic YOLOv8 output tensor with one detection.
+    """Create a synthetic YOLO output tensor with one detection.
 
-    Shape: ``(1, 6, 1)`` — batch=1, channels=4(box)+2(classes), preds=1.
+    The box is in 480×480 model-input pixels (centred).  Shape: ``(1, 6, 1)``
+    — batch=1, channels=4(box)+2(classes), preds=1.
     """
     data = np.zeros((1, 6, 1), dtype=np.float32)
     data[0, 0, 0] = cx
@@ -469,7 +688,7 @@ class TestFireModel:
 
     def test_no_crash_without_onnx_model(self):
         # When the ONNX file is absent, every frame returns not-detected.
-        model = FireModel()
+        model = FireModel(model_path="/nonexistent/fire_yolo11s_480.onnx")
         model.load()
         white = np.full((100, 100, 3), 240, dtype=np.uint8)
         for _ in range(10):
@@ -483,6 +702,87 @@ class TestFireModel:
         assert model._classify_severity(0.20) == "hazardous"
         assert model._classify_severity(0.08) == "controllable"
         assert model._classify_severity(0.025) == "small"
+
+    def test_defaults_point_at_yolo11s_480(self):
+        assert FireModel.MODEL_PATH.endswith("fire_yolo11s_480.onnx")
+        assert FireModel.LABELS_PATH.endswith("fire_yolo11s_labels.json")
+        assert FireModel.INPUT_SIZE == 480
+        assert FireModel.CONFIDENCE_THRESHOLD == 0.35
+
+    def test_load_trusts_onnx_over_config_and_labels_file(self, tmp_path, caplog):
+        model_file = tmp_path / "fire.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        labels = tmp_path / "labels.json"
+        labels.write_text('{"classes": ["smoke", "fire"]}')  # disagrees with ONNX
+
+        model_input = MagicMock(shape=[1, 3, 480, 480])
+        model_input.name = "images"
+        session = MagicMock()
+        session.get_inputs.return_value = [model_input]
+        session.get_modelmeta.return_value.custom_metadata_map = {
+            "description": "Ultralytics YOLO11s model trained on fire.yaml",
+            "names": "{0: 'fire', 1: 'smoke'}",
+        }
+
+        model = FireModel(model_path=str(model_file), labels_path=str(labels), input_size=416)
+        caplog.set_level("INFO", logger="models.fire_model")
+        with patch("onnxruntime.InferenceSession", return_value=session):
+            model.load()
+
+        assert model._input_size == 480                          # ONNX shape wins
+        assert model._class_names == {0: "fire", 1: "smoke"}      # ONNX names win
+        assert "using the ONNX metadata" in caplog.text           # mismatch warned
+        assert ("FireModel loaded - YOLO11s ONNX, input=[1,3,480,480], "
+                "classes=['fire','smoke'], conf=0.35, iou=0.45, trigger=3.0") in caplog.text
+        model.unload()
+
+    def test_session_uses_configured_thread_cap(self, tmp_path):
+        model_file = tmp_path / "fire.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        session = MagicMock()
+        session.get_inputs.return_value = [MagicMock(shape=[1, 3, 480, 480])]
+        session.get_modelmeta.return_value.custom_metadata_map = {}
+
+        model = FireModel(model_path=str(model_file), intra_op_threads=4)
+        with patch("onnxruntime.InferenceSession", return_value=session) as ctor:
+            model.load()
+        assert ctor.call_args.kwargs["sess_options"].intra_op_num_threads == 4
+        model.unload()
+
+
+def test_session_options_caps_intra_op_threads():
+    from models.ort_options import session_options
+
+    assert session_options(0).intra_op_num_threads == 0  # runtime default
+    assert session_options(3).intra_op_num_threads == 3
+
+
+@requires_real_fire_model
+class TestFireModelRealOnnx:
+    """Runs the real fire_yolo11s_480.onnx; skipped when the file isn't present."""
+
+    def test_signature(self):
+        model = FireModel(model_path=_REAL_FIRE_MODEL)
+        model.load()
+        session = model._session
+        assert session.get_inputs()[0].shape == [1, 3, 480, 480]
+        blob = np.zeros((1, 3, 480, 480), dtype=np.float32)
+        output = session.run(None, {model._input_name: blob})[0]
+        assert output.ndim == 3 and output.shape[:2] == (1, 6) and output.shape[2] > 0
+        assert [model._class_names[i] for i in sorted(model._class_names)] == ["fire", "smoke"]
+        assert model._input_size == 480
+        model.unload()
+
+    @pytest.mark.parametrize("value", [0, 255], ids=["black", "bright_white"])
+    def test_blank_frames_never_trigger(self, value):
+        # Basic guard against bright-light false positives.
+        model = FireModel(model_path=_REAL_FIRE_MODEL)
+        model.load()
+        frame = np.full((480, 640, 3), value, dtype=np.uint8)
+        results = [model.predict(frame) for _ in range(10)]
+        assert not any(r["detected"] for r in results)
+        assert results[-1]["fire_score"] == 0.0  # not even one raw detection
+        model.unload()
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +1017,24 @@ class TestActivityModel:
         model = ActivityModel()
         with pytest.raises(RuntimeError):
             model.predict(_dummy_frame())
+
+    def test_session_uses_configured_thread_cap(self, tmp_path):
+        model_file = tmp_path / "activity.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        fake_input = MagicMock(shape=["batch", 3, 224, 224])
+        fake_input.name = "input"
+        fake_session = MagicMock()
+        fake_session.get_inputs.return_value = [fake_input]
+
+        model = ActivityModel(
+            model_path=str(model_file),
+            label_map_path=str(tmp_path / "missing.json"),
+            intra_op_threads=1,
+        )
+        with patch("onnxruntime.InferenceSession", return_value=fake_session) as ctor:
+            model.load()
+        assert ctor.call_args.kwargs["sess_options"].intra_op_num_threads == 1
+        model.unload()
 
 
 # ---------------------------------------------------------------------------

@@ -14,14 +14,24 @@ face_auth:
   max_attempts: 3
   attempt_timeout_seconds: 10
   encodings_path: "data/face_encodings.pkl"
+  auth_threshold: 0.60           # smoothed cosine similarity for AUTHORIZED
+  unknown_threshold: 0.30        # below this for unknown_confirm_frames -> UNKNOWN
+  ema_alpha: 0.3                 # weight of the newest frame in the similarity EMA
+  unknown_confirm_frames: 5
+  track_max_missed: 10           # face-model runs a track survives unseen
+  presence_interval_frames: 10   # ACTIVE_DETECTION: face model every N frames
+  max_faces: 6
+  intra_op_threads: 1            # presence-mode ONNX threads (0 = all); leaves cores for fire
 
 fire:
-  model_path: "data/model_artifacts/models/fire_yolov8n.onnx"
-  confidence_threshold: 0.35
+  model_path: "data/model_artifacts/models/fire_yolo11s_480.onnx"
+  labels_path: "data/model_artifacts/models/fire_yolo11s_labels.json"
+  confidence_threshold: 0.35   # 1.0% false-positive frames on D-Fire negatives (0.22 gives 2.4%)
   iou_threshold: 0.45
-  input_size: 416
+  input_size: 480              # fallback only; the ONNX input shape wins at load
   score_threshold: 3.0
   score_cap: 10.0
+  intra_op_threads: 4          # ONNX threads (0 = runtime default); 4 = M2 performance cores
 
 activity:
   model_path: "data/model_artifacts/models/sentinel_activity_mnv3.onnx"
@@ -29,12 +39,11 @@ activity:
   confidence_threshold: 0.60
   score_threshold: 3.0
   score_cap: 10.0
+  intra_op_threads: 1          # ONNX threads (0 = runtime default); ~2-3 ms per call
 
 detection:
   active_timeout_seconds: 30
   cooldown_seconds: 5
-  loitering_threshold_seconds: 30.0
-  loitering_movement_pixels: 20.0
 
 alerts:
   dry_run: true

@@ -65,12 +65,39 @@ def main() -> None:
     from models.activity_model import ActivityModel
 
     gesture_model = GestureModel()
-    face_model = FaceModel(encodings_path=cfg.face_auth.encodings_path)
-    fire_model = FireModel()
+    # face_auth.presence_interval_frames is read by ActiveDetectionState
+    # from the same config.
+    face_auth = cfg.face_auth
+    face_model = FaceModel(
+        encodings_path=face_auth.encodings_path,
+        match_threshold=face_auth.auth_threshold,
+        unknown_threshold=face_auth.unknown_threshold,
+        ema_alpha=face_auth.ema_alpha,
+        unknown_confirm_frames=face_auth.unknown_confirm_frames,
+        track_max_missed=face_auth.track_max_missed,
+        max_faces=face_auth.max_faces,
+        intra_op_threads=face_auth.intra_op_threads,
+    )
+    fire_cfg = cfg.fire
+    fire_model = FireModel(
+        model_path=fire_cfg.model_path,
+        labels_path=fire_cfg.labels_path,
+        confidence_threshold=fire_cfg.confidence_threshold,
+        iou_threshold=fire_cfg.iou_threshold,
+        input_size=fire_cfg.input_size,
+        score_threshold=fire_cfg.score_threshold,
+        score_cap=fire_cfg.score_cap,
+        intra_op_threads=fire_cfg.intra_op_threads,
+    )
     injury_model = InjuryModel()
+    activity_cfg = cfg.activity
     activity_model = ActivityModel(
-        loitering_threshold_seconds=cfg.detection.loitering_threshold_seconds,
-        loitering_movement_pixels=cfg.detection.loitering_movement_pixels,
+        model_path=activity_cfg.model_path,
+        label_map_path=activity_cfg.label_map_path,
+        confidence_threshold=activity_cfg.confidence_threshold,
+        score_threshold=activity_cfg.score_threshold,
+        score_cap=activity_cfg.score_cap,
+        intra_op_threads=activity_cfg.intra_op_threads,
     )
 
     # Wire ModelLoaded / ModelUnloaded events

@@ -40,28 +40,100 @@ class FaceAuthConfig:
     max_attempts: int = 3
     attempt_timeout_seconds: float = 10.0
     encodings_path: str = "data/face_encodings.pkl"
+    # Multi-person identification. Defaults mirror FaceModel's class constants.
+    auth_threshold: float = 0.60
+    unknown_threshold: float = 0.30
+    ema_alpha: float = 0.3
+    unknown_confirm_frames: int = 5
+    track_max_missed: int = 10
+    presence_interval_frames: int = 10
+    max_faces: int = 6
+    # ONNX Runtime intra-op threads for the face sessions in presence mode
+    # (0 = runtime default); verify mode always uses the default.
+    intra_op_threads: int = 0
 
     def validate(self) -> None:
         if self.attempt_timeout_seconds <= 0:
             raise ValueError("face_auth.attempt_timeout_seconds must be > 0")
+        if not 0.0 <= self.unknown_threshold <= self.auth_threshold <= 1.0:
+            raise ValueError(
+                "face_auth thresholds must satisfy "
+                "0 <= unknown_threshold <= auth_threshold <= 1"
+            )
+        if not 0.0 < self.ema_alpha <= 1.0:
+            raise ValueError("face_auth.ema_alpha must be in (0, 1]")
+        if self.unknown_confirm_frames < 1:
+            raise ValueError("face_auth.unknown_confirm_frames must be >= 1")
+        if self.track_max_missed < 0:
+            raise ValueError("face_auth.track_max_missed must be >= 0")
+        if self.presence_interval_frames < 1:
+            raise ValueError("face_auth.presence_interval_frames must be >= 1")
+        if self.max_faces < 1:
+            raise ValueError("face_auth.max_faces must be >= 1")
+        if self.intra_op_threads < 0:
+            raise ValueError("face_auth.intra_op_threads must be >= 0")
 
 
 @dataclass
 class DetectionConfig:
     active_timeout_seconds: float = 30.0
     cooldown_seconds: float = 5.0
-    loitering_threshold_seconds: float = 30.0
-    loitering_movement_pixels: float = 20.0
 
     def validate(self) -> None:
         if self.active_timeout_seconds <= 0:
             raise ValueError("detection.active_timeout_seconds must be > 0")
         if self.cooldown_seconds <= 0:
             raise ValueError("detection.cooldown_seconds must be > 0")
-        if self.loitering_threshold_seconds <= 0:
-            raise ValueError("detection.loitering_threshold_seconds must be > 0")
-        if self.loitering_movement_pixels < 0:
-            raise ValueError("detection.loitering_movement_pixels must be >= 0")
+
+
+@dataclass
+class FireConfig:
+    # Defaults mirror FireModel's class constants.
+    model_path: str = "data/model_artifacts/models/fire_yolo11s_480.onnx"
+    labels_path: str = "data/model_artifacts/models/fire_yolo11s_labels.json"
+    confidence_threshold: float = 0.35
+    iou_threshold: float = 0.45
+    input_size: int = 480
+    score_threshold: float = 3.0
+    score_cap: float = 10.0
+    # ONNX Runtime intra-op threads for the fire session (0 = runtime default).
+    intra_op_threads: int = 0
+
+    def validate(self) -> None:
+        if not 0.0 < self.confidence_threshold <= 1.0:
+            raise ValueError("fire.confidence_threshold must be in (0, 1]")
+        if not 0.0 < self.iou_threshold <= 1.0:
+            raise ValueError("fire.iou_threshold must be in (0, 1]")
+        if self.input_size <= 0:
+            raise ValueError("fire.input_size must be > 0")
+        if self.score_threshold <= 0:
+            raise ValueError("fire.score_threshold must be > 0")
+        if self.score_cap < self.score_threshold:
+            raise ValueError("fire.score_cap must be >= fire.score_threshold")
+        if self.intra_op_threads < 0:
+            raise ValueError("fire.intra_op_threads must be >= 0")
+
+
+@dataclass
+class ActivityConfig:
+    # Defaults mirror ActivityModel's class constants.
+    model_path: str = "data/model_artifacts/models/sentinel_activity_mnv3.onnx"
+    label_map_path: str = "data/model_artifacts/models/activity_label_map.json"
+    confidence_threshold: float = 0.60
+    score_threshold: float = 3.0
+    score_cap: float = 10.0
+    # ONNX Runtime intra-op threads for the activity session (0 = runtime default).
+    intra_op_threads: int = 0
+
+    def validate(self) -> None:
+        if not 0.0 < self.confidence_threshold <= 1.0:
+            raise ValueError("activity.confidence_threshold must be in (0, 1]")
+        if self.score_threshold <= 0:
+            raise ValueError("activity.score_threshold must be > 0")
+        if self.score_cap < self.score_threshold:
+            raise ValueError("activity.score_cap must be >= activity.score_threshold")
+        if self.intra_op_threads < 0:
+            raise ValueError("activity.intra_op_threads must be >= 0")
 
 
 @dataclass
@@ -108,6 +180,8 @@ class AppConfig:
     gesture: GestureConfig = field(default_factory=GestureConfig)
     face_auth: FaceAuthConfig = field(default_factory=FaceAuthConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    fire: FireConfig = field(default_factory=FireConfig)
+    activity: ActivityConfig = field(default_factory=ActivityConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     frame: FrameConfig = field(default_factory=FrameConfig)
@@ -117,6 +191,8 @@ class AppConfig:
         self.gesture.validate()
         self.face_auth.validate()
         self.detection.validate()
+        self.fire.validate()
+        self.activity.validate()
         self.alerts.validate()
         self.logging.validate()
         self.frame.validate()
@@ -134,6 +210,8 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         gesture=_build(GestureConfig, raw.get("gesture")),
         face_auth=_build(FaceAuthConfig, raw.get("face_auth")),
         detection=_build(DetectionConfig, raw.get("detection")),
+        fire=_build(FireConfig, raw.get("fire")),
+        activity=_build(ActivityConfig, raw.get("activity")),
         alerts=_build(AlertsConfig, raw.get("alerts")),
         logging=_build(LoggingConfig, raw.get("logging")),
         frame=_build(FrameConfig, raw.get("frame")),
