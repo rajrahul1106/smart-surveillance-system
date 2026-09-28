@@ -48,6 +48,9 @@ class FaceAuthConfig:
     track_max_missed: int = 10
     presence_interval_frames: int = 10
     max_faces: int = 6
+    # ONNX Runtime intra-op threads for the face sessions in presence mode
+    # (0 = runtime default); verify mode always uses the default.
+    intra_op_threads: int = 0
 
     def validate(self) -> None:
         if self.attempt_timeout_seconds <= 0:
@@ -67,6 +70,8 @@ class FaceAuthConfig:
             raise ValueError("face_auth.presence_interval_frames must be >= 1")
         if self.max_faces < 1:
             raise ValueError("face_auth.max_faces must be >= 1")
+        if self.intra_op_threads < 0:
+            raise ValueError("face_auth.intra_op_threads must be >= 0")
 
 
 @dataclass
@@ -97,6 +102,8 @@ class FireConfig:
     input_size: int = 480
     score_threshold: float = 3.0
     score_cap: float = 10.0
+    # ONNX Runtime intra-op threads for the fire session (0 = runtime default).
+    intra_op_threads: int = 0
 
     def validate(self) -> None:
         if not 0.0 < self.confidence_threshold <= 1.0:
@@ -109,6 +116,8 @@ class FireConfig:
             raise ValueError("fire.score_threshold must be > 0")
         if self.score_cap < self.score_threshold:
             raise ValueError("fire.score_cap must be >= fire.score_threshold")
+        if self.intra_op_threads < 0:
+            raise ValueError("fire.intra_op_threads must be >= 0")
 
 
 @dataclass

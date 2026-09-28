@@ -21,6 +21,7 @@ face_auth:
   track_max_missed: 10           # face-model runs a track survives unseen
   presence_interval_frames: 10   # ACTIVE_DETECTION: face model every N frames
   max_faces: 6
+  intra_op_threads: 1            # presence-mode ONNX threads (0 = all); leaves cores for fire
 
 fire:
   model_path: "data/model_artifacts/models/fire_yolo11s_480.onnx"
@@ -30,6 +31,7 @@ fire:
   input_size: 480              # fallback only; the ONNX input shape wins at load
   score_threshold: 3.0
   score_cap: 10.0
+  intra_op_threads: 4          # ONNX threads (0 = runtime default); 4 = M2 performance cores
 
 detection:
   active_timeout_seconds: 30

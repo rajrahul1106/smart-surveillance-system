@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ class FireModel(BaseModel):
     INPUT_SIZE = 480
     CONFIDENCE_THRESHOLD = 0.35
     IOU_THRESHOLD = 0.45
+    # ONNX Runtime intra-op threads (0 = runtime default).  Capped via config
+    # so fire and face presence inference don't fight over the same cores.
+    INTRA_OP_THREADS = 0
 
     # -- Leaky accumulator (same concept as before) -------------------------
     BOOST_RATE = 1.0        # fire detection  -> strong boost
@@ -78,10 +82,12 @@ class FireModel(BaseModel):
         score_threshold: float = SCORE_THRESHOLD,
         score_cap: float = SCORE_CAP,
         labels_path: Optional[str] = None,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
         self._model_path = model_path or self.MODEL_PATH
         self._labels_path = labels_path or self.LABELS_PATH
+        self._intra_op_threads = intra_op_threads
         self._conf_threshold = confidence_threshold
         self._iou_threshold = iou_threshold
         self._input_size = input_size
@@ -115,6 +121,7 @@ class FireModel(BaseModel):
 
         self._session = ort.InferenceSession(
             self._model_path,
+            sess_options=session_options(self._intra_op_threads),
             providers=["CPUExecutionProvider"],
         )
         model_input = self._session.get_inputs()[0]
@@ -149,11 +156,12 @@ class FireModel(BaseModel):
         self._check_labels_file(names_list)
         logger.info(
             "FireModel loaded - %s ONNX, input=[%s], classes=[%s], "
-            "conf=%.2f, iou=%.2f, trigger=%.1f",
+            "conf=%.2f, iou=%.2f, trigger=%.1f, threads=%s",
             _architecture(metadata),
             ",".join(str(d) for d in input_shape),
             ",".join(repr(n) for n in names_list),
             self._conf_threshold, self._iou_threshold, self._score_threshold,
+            self._intra_op_threads or "default",
         )
 
     def _check_labels_file(self, onnx_classes: List[str]) -> None:
