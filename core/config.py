@@ -78,18 +78,12 @@ class FaceAuthConfig:
 class DetectionConfig:
     active_timeout_seconds: float = 30.0
     cooldown_seconds: float = 5.0
-    loitering_threshold_seconds: float = 30.0
-    loitering_movement_pixels: float = 20.0
 
     def validate(self) -> None:
         if self.active_timeout_seconds <= 0:
             raise ValueError("detection.active_timeout_seconds must be > 0")
         if self.cooldown_seconds <= 0:
             raise ValueError("detection.cooldown_seconds must be > 0")
-        if self.loitering_threshold_seconds <= 0:
-            raise ValueError("detection.loitering_threshold_seconds must be > 0")
-        if self.loitering_movement_pixels < 0:
-            raise ValueError("detection.loitering_movement_pixels must be >= 0")
 
 
 @dataclass
@@ -118,6 +112,28 @@ class FireConfig:
             raise ValueError("fire.score_cap must be >= fire.score_threshold")
         if self.intra_op_threads < 0:
             raise ValueError("fire.intra_op_threads must be >= 0")
+
+
+@dataclass
+class ActivityConfig:
+    # Defaults mirror ActivityModel's class constants.
+    model_path: str = "data/model_artifacts/models/sentinel_activity_mnv3.onnx"
+    label_map_path: str = "data/model_artifacts/models/activity_label_map.json"
+    confidence_threshold: float = 0.60
+    score_threshold: float = 3.0
+    score_cap: float = 10.0
+    # ONNX Runtime intra-op threads for the activity session (0 = runtime default).
+    intra_op_threads: int = 0
+
+    def validate(self) -> None:
+        if not 0.0 < self.confidence_threshold <= 1.0:
+            raise ValueError("activity.confidence_threshold must be in (0, 1]")
+        if self.score_threshold <= 0:
+            raise ValueError("activity.score_threshold must be > 0")
+        if self.score_cap < self.score_threshold:
+            raise ValueError("activity.score_cap must be >= activity.score_threshold")
+        if self.intra_op_threads < 0:
+            raise ValueError("activity.intra_op_threads must be >= 0")
 
 
 @dataclass
@@ -165,6 +181,7 @@ class AppConfig:
     face_auth: FaceAuthConfig = field(default_factory=FaceAuthConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     fire: FireConfig = field(default_factory=FireConfig)
+    activity: ActivityConfig = field(default_factory=ActivityConfig)
     alerts: AlertsConfig = field(default_factory=AlertsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     frame: FrameConfig = field(default_factory=FrameConfig)
@@ -175,6 +192,7 @@ class AppConfig:
         self.face_auth.validate()
         self.detection.validate()
         self.fire.validate()
+        self.activity.validate()
         self.alerts.validate()
         self.logging.validate()
         self.frame.validate()
@@ -193,6 +211,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         face_auth=_build(FaceAuthConfig, raw.get("face_auth")),
         detection=_build(DetectionConfig, raw.get("detection")),
         fire=_build(FireConfig, raw.get("fire")),
+        activity=_build(ActivityConfig, raw.get("activity")),
         alerts=_build(AlertsConfig, raw.get("alerts")),
         logging=_build(LoggingConfig, raw.get("logging")),
         frame=_build(FrameConfig, raw.get("frame")),

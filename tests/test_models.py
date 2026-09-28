@@ -824,106 +824,217 @@ class TestInjuryModel:
 
 
 # ---------------------------------------------------------------------------
-# ActivityModel
+# ActivityModel (MobileNetV3-Small ONNX)
 # ---------------------------------------------------------------------------
 
+# Raw logits — the ONNX model does NOT apply softmax.  Class order is
+# [normal, robbery, violence]; comments give softmax(logits) in percent.
+_NORMAL_LOGITS = [[3.7, -3.9, 1.4]]        # normal 90.85 / robbery 0.05 / violence 9.11
+_VIOLENCE_LOGITS = [[-2.0, -1.0, 4.0]]     # violence 99.09
+_WEAK_ROBBERY_LOGITS = [[0.0, 0.3, -0.5]]  # robbery on top at 45.66 (< 60 % threshold)
+
+
+def _offline_activity_model(**kwargs) -> ActivityModel:
+    """ActivityModel pointed at non-existent artefacts, so tests never depend
+    on the real ONNX file — inference goes through a mock session instead."""
+    return ActivityModel(
+        model_path="/nonexistent/sentinel_activity_mnv3.onnx",
+        label_map_path="/nonexistent/activity_label_map.json",
+        **kwargs,
+    )
+
+
+def _attach_mock_activity_session(model, logits):
+    """Wire a MagicMock ONNX session onto *model* that returns *logits*."""
+    mock_session = MagicMock()
+    mock_session.run.return_value = [np.asarray(logits, dtype=np.float32)]
+    model._session = mock_session
+    return mock_session
+
+
 class TestActivityModel:
-    def test_load_unload_lifecycle(self):
-        model = ActivityModel()
-        model.load()
+    def test_load_unload_lifecycle(self, tmp_path):
+        model_file = tmp_path / "activity.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        label_map = tmp_path / "labels.json"
+        label_map.write_text(
+            '{"classes": ["normal", "robbery", "violence"], "img_size": 224}'
+        )
+        fake_input = MagicMock()
+        fake_input.name = "input"
+        fake_input.shape = ["batch", 3, 224, 224]
+        fake_session = MagicMock()
+        fake_session.get_inputs.return_value = [fake_input]
+
+        model = ActivityModel(model_path=str(model_file), label_map_path=str(label_map))
+        with patch("onnxruntime.InferenceSession", return_value=fake_session):
+            model.load()
         assert model.is_loaded
-        assert model._hog is not None
-        assert model._face_cascade is not None
-        assert model._bg_subtractor is not None
+        assert model._session is fake_session
+        assert model._input_name == "input"
+        assert model._classes == ["normal", "robbery", "violence"]
+        assert model._img_size == 224
+
         model.unload()
         assert not model.is_loaded
-        assert model._hog is None
-        assert model._face_cascade is None
-        assert model._bg_subtractor is None
+        assert model._session is None
 
     def test_predict_returns_required_keys(self):
-        model = ActivityModel()
+        model = _offline_activity_model()
         model.load()
+        _attach_mock_activity_session(model, _NORMAL_LOGITS)
         result = model.predict(_dummy_frame())
-        for key in ("detected", "suspicious", "activity_type", "confidence", "bbox"):
+        for key in (
+            # Contract read by the annotator / pipeline / alert service
+            "detected", "suspicious", "activity_type", "confidence", "bbox",
+            "frame_size",
+            # Additive keys from the ONNX classifier
+            "activity_detected", "severity_level", "confidence_pct",
+            "activity_score", "class_probabilities",
+        ):
             assert key in result, f"Missing key: {key}"
-        assert result["activity_type"] in (
-            "none", "masked_face", "loitering", "weapon_like_object",
+        assert result["bbox"] is None  # whole-frame classifier
+        assert result["frame_size"] == (640, 480)
+        model.unload()
+
+    def test_preprocess_matches_model_signature(self):
+        # The ONNX input is "input", float32 NCHW [1, 3, 224, 224], RGB with
+        # ImageNet normalisation.  A pure-blue BGR frame checks channel order.
+        model = _offline_activity_model()
+        model.load()
+        session = _attach_mock_activity_session(model, _NORMAL_LOGITS)
+        blue = np.zeros((240, 320, 3), dtype=np.uint8)
+        blue[:, :, 0] = 255  # BGR blue
+        model.predict(blue)
+
+        blob = session.run.call_args[0][1]["input"]
+        assert blob.shape == (1, 3, 224, 224)
+        assert blob.dtype == np.float32
+        # After the BGR→RGB flip: R=0, G=0, B=1.0, then (x - mean) / std
+        np.testing.assert_allclose(
+            blob[0, :, 0, 0], [-2.1179, -2.0357, 2.64], atol=1e-3,
         )
         model.unload()
 
-    def test_no_activity_in_black_frame(self):
-        model = ActivityModel()
+    def test_softmax_applied_to_raw_logits(self):
+        model = _offline_activity_model()
         model.load()
+        _attach_mock_activity_session(model, _NORMAL_LOGITS)
         result = model.predict(_dummy_frame())
-        assert result["suspicious"] is False
+        # softmax([3.7, -3.9, 1.4]) → normal ≈ 90.85 %, not the raw logit 3.7
+        assert result["confidence"] == pytest.approx(90.85, abs=0.01)
+        probs = result["class_probabilities"]
+        assert probs["normal"] == pytest.approx(90.85, abs=0.01)
+        assert sum(probs.values()) == pytest.approx(100.0, abs=0.05)
+        assert result["detected"] is False
         assert result["activity_type"] == "none"
         model.unload()
 
-    def test_loitering_does_not_trigger_on_blank_frames(self):
-        # Regression: blank frames have no person, so loitering must NOT fire
-        # regardless of how many frames are fed.
-        model = ActivityModel(loitering_threshold_seconds=0.05)
+    def test_leaky_accumulator_confirms_after_three_suspicious_frames(self):
+        model = _offline_activity_model()
         model.load()
-        frame = _dummy_frame(100, 100)
-        for _ in range(10):
-            result = model.predict(frame)
-        assert result["activity_type"] != "loitering"
-        assert result["suspicious"] is False
+        _attach_mock_activity_session(model, _VIOLENCE_LOGITS)
+        frame = _dummy_frame(240, 320)
+
+        # Frames 1-2: score climbs 1.0 → 2.0 but hasn't reached the 3.0 trigger.
+        for i in range(2):
+            r = model.predict(frame)
+            assert r["detected"] is False, f"frame {i+1} triggered too early"
+
+        # Frame 3: score reaches 3.0 — activity confirmed.
+        r = model.predict(frame)
+        assert r["detected"] is True
+        assert r["suspicious"] is True
+        assert r["activity_type"] == "violence"
+        assert r["severity_level"] == "violence"
+        assert r["confidence"] == 99.0  # softmax 99.09 %, capped at 99 like FireModel
+        assert r["frame_size"] == (320, 240)
+
+        # One normal frame decays the score (3.0 → 2.7) instead of zeroing it...
+        _attach_mock_activity_session(model, _NORMAL_LOGITS)
+        r = model.predict(frame)
+        assert r["detected"] is False
+        assert r["activity_score"] == pytest.approx(2.7)
+
+        # ...so a single further suspicious frame re-confirms (2.7 → 3.7).
+        _attach_mock_activity_session(model, _VIOLENCE_LOGITS)
+        assert model.predict(frame)["detected"] is True
         model.unload()
 
-    def test_loitering_requires_threshold_duration(self):
-        # Simulate a stationary person by setting the loiter anchor directly,
-        # then advance the wall-clock by patching time.monotonic. This avoids
-        # depending on HOG/MOG2 ever detecting a synthetic black frame.
-        import time as _time
-        model = ActivityModel(loitering_threshold_seconds=0.1)
+    def test_confirmed_alert_reports_trigger_class_while_decaying(self):
+        model = _offline_activity_model()
         model.load()
-        # Pretend a person was detected at this centroid 0.2s ago.
-        model._anchor_centroid = (50.0, 50.0)
-        model._anchor_time = _time.monotonic() - 0.2
-        # Manually invoke _detect_loitering with a fake frame + person bbox
-        # by stubbing _find_person_bbox to return the same centroid.
-        model._find_person_bbox = lambda *a, **kw: (40, 40, 20, 20)
-        frame = _dummy_frame(100, 100)
-        gray = np.zeros((100, 100), dtype=np.uint8)
-        result = model._detect_loitering(frame, gray)
-        assert result["detected"] is True
-        assert result["confidence"] > 0
+        frame = _dummy_frame(240, 320)
+        _attach_mock_activity_session(model, _VIOLENCE_LOGITS)
+        for _ in range(4):
+            model.predict(frame)  # score 4.0
+
+        # Normal frame: score 3.7 is still above the trigger, so the alert
+        # holds — and must keep naming the class that raised it.
+        _attach_mock_activity_session(model, _NORMAL_LOGITS)
+        r = model.predict(frame)
+        assert r["detected"] is True
+        assert r["activity_type"] == "violence"
+        assert r["confidence"] == 99.0  # softmax 99.09 %, capped at 99 like FireModel
+        assert r["class_probabilities"]["normal"] == pytest.approx(90.85, abs=0.01)
         model.unload()
 
-    def test_loitering_resets_when_person_moves(self):
-        import time as _time
-        model = ActivityModel(
-            loitering_threshold_seconds=0.1,
-            loitering_movement_pixels=20.0,
+    def test_partial_boost_below_confidence_threshold(self):
+        # Suspicious class on top but under 60 % → +0.4 per frame, not +1.0.
+        model = _offline_activity_model()
+        model.load()
+        _attach_mock_activity_session(model, _WEAK_ROBBERY_LOGITS)
+        frame = _dummy_frame(240, 320)
+
+        r = model.predict(frame)
+        assert r["activity_score"] == pytest.approx(0.4)
+        assert r["detected"] is False
+        for _ in range(6):
+            r = model.predict(frame)
+        assert r["detected"] is False  # 7 × 0.4 = 2.8
+        r = model.predict(frame)
+        assert r["detected"] is True   # 8 × 0.4 = 3.2
+        assert r["activity_type"] == "robbery"
+        model.unload()
+
+    def test_no_crash_without_onnx_model(self, caplog):
+        # A missing ONNX file logs an error and every frame reports not-detected.
+        model = _offline_activity_model()
+        model.load()
+        assert model.is_loaded
+        assert model._session is None
+        assert any(
+            rec.levelname == "ERROR" and "not found" in rec.getMessage()
+            for rec in caplog.records
         )
-        model.load()
-        model._anchor_centroid = (50.0, 50.0)
-        model._anchor_time = _time.monotonic() - 0.2
-        # Person now far away from the anchor (>20 px away)
-        model._find_person_bbox = lambda *a, **kw: (200, 200, 20, 20)
-        frame = _dummy_frame(300, 300)
-        gray = np.zeros((300, 300), dtype=np.uint8)
-        result = model._detect_loitering(frame, gray)
-        # Movement > threshold, so timer resets and loitering should NOT fire
-        assert result["detected"] is False
-        # Anchor should now be at the new position
-        assert model._anchor_centroid == (210.0, 210.0)
+        for _ in range(5):
+            r = model.predict(_dummy_frame())
+        assert r["detected"] is False
+        assert r["activity_type"] == "none"
         model.unload()
-
-    def test_unload_clears_frame_buffer(self):
-        model = ActivityModel()
-        model.load()
-        model.predict(_dummy_frame())
-        assert model._prev_gray is not None
-        model.unload()
-        assert model._prev_gray is None
 
     def test_predict_raises_when_not_loaded(self):
         model = ActivityModel()
         with pytest.raises(RuntimeError):
             model.predict(_dummy_frame())
+
+    def test_session_uses_configured_thread_cap(self, tmp_path):
+        model_file = tmp_path / "activity.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        fake_input = MagicMock(shape=["batch", 3, 224, 224])
+        fake_input.name = "input"
+        fake_session = MagicMock()
+        fake_session.get_inputs.return_value = [fake_input]
+
+        model = ActivityModel(
+            model_path=str(model_file),
+            label_map_path=str(tmp_path / "missing.json"),
+            intra_op_threads=1,
+        )
+        with patch("onnxruntime.InferenceSession", return_value=fake_session) as ctor:
+            model.load()
+        assert ctor.call_args.kwargs["sess_options"].intra_op_num_threads == 1
+        model.unload()
 
 
 # ---------------------------------------------------------------------------
@@ -934,15 +1045,15 @@ class TestMemoryCleanup:
     def test_unload_triggers_gc(self):
         """Verify that unload() calls gc.collect (tested indirectly via
         the is_loaded flag and attribute cleanup)."""
-        model = ActivityModel()
+        model = _offline_activity_model()
         model.load()
+        _attach_mock_activity_session(model, _VIOLENCE_LOGITS)
+        model.predict(_dummy_frame())
         assert model.is_loaded
         model.unload()
         assert not model.is_loaded
-        assert model._hog is None
-        assert model._face_cascade is None
-        assert model._bg_subtractor is None
-        assert model._prev_gray is None
+        assert model._session is None
+        assert model._activity_score == 0.0
 
     @patch.dict("sys.modules", _mock_insightface())
     def test_unload_reduces_memory(self):

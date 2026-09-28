@@ -90,9 +90,14 @@ def main() -> None:
         intra_op_threads=fire_cfg.intra_op_threads,
     )
     injury_model = InjuryModel()
+    activity_cfg = cfg.activity
     activity_model = ActivityModel(
-        loitering_threshold_seconds=cfg.detection.loitering_threshold_seconds,
-        loitering_movement_pixels=cfg.detection.loitering_movement_pixels,
+        model_path=activity_cfg.model_path,
+        label_map_path=activity_cfg.label_map_path,
+        confidence_threshold=activity_cfg.confidence_threshold,
+        score_threshold=activity_cfg.score_threshold,
+        score_cap=activity_cfg.score_cap,
+        intra_op_threads=activity_cfg.intra_op_threads,
     )
 
     # Wire ModelLoaded / ModelUnloaded events

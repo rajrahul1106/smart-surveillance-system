@@ -1,362 +1,305 @@
 from __future__ import annotations
 
+import json
 import logging
-import time
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
 
 logger = logging.getLogger(__name__)
 
 
 class ActivityModel(BaseModel):
-    """Suspicious activity detection.
+    """MobileNetV3-Small ONNX classifier for suspicious-activity detection.
 
-    - Masked faces:    Haar cascade + lower-half texture/edge analysis
-    - Weapon-like:     elongated foreground contours (MOG2 background subtraction)
-    - Loitering:       a person whose center-of-mass barely moves over a
-                       configurable wall-clock duration (default 30 s).
+    Replaces the previous HOG+SVM approach.  Classifies each sampled frame as
+    one of {normal, robbery, violence} and confirms an alert only after a
+    leaky-accumulator temporal filter crosses its threshold, mirroring the
+    fire model's stability strategy.
+
+    The classifier looks at the whole frame, so results never carry a bbox.
+    The ONNX graph outputs RAW LOGITS — softmax is applied once, in
+    ``_do_predict``.  If the model file is absent the detector degrades
+    gracefully (every frame returns *not detected*).
     """
 
-    HOG_WIN_SIZE = (64, 128)
-    HOG_BLOCK_SIZE = (16, 16)
-    HOG_BLOCK_STRIDE = (8, 8)
-    HOG_CELL_SIZE = (8, 8)
-    HOG_NBINS = 9
+    # -- Model artefact paths -----------------------------------------------
+    MODEL_PATH = os.path.join(
+        "data", "model_artifacts", "models", "sentinel_activity_mnv3.onnx",
+    )
+    LABEL_MAP_PATH = os.path.join(
+        "data", "model_artifacts", "models", "activity_label_map.json",
+    )
 
-    # Elongated object detection (formerly "weapon-like")
-    ELONGATION_RATIO = 4.0
-    MIN_ELONGATED_AREA = 500
-    # Confidence gates for the suspicious-object pipeline:
-    #   conf >= SUSPICIOUS_OBJECT_THRESHOLD  → activity_type="suspicious_object"
-    #   POSSIBLE_CONCERN_THRESHOLD <= conf <  threshold → "possible_concern"
-    #   conf <  POSSIBLE_CONCERN_THRESHOLD → suppressed entirely
-    SUSPICIOUS_OBJECT_THRESHOLD = 0.80
-    POSSIBLE_CONCERN_THRESHOLD = 0.60
-    # Object must persist for this many consecutive frames before reporting.
-    SUSPICIOUS_OBJECT_MIN_CONSECUTIVE = 3
+    # -- Fallback defaults if the label map is missing ----------------------
+    DEFAULT_CLASSES = ["normal", "robbery", "violence"]
+    DEFAULT_IMG_SIZE = 224
+    DEFAULT_MEAN = [0.485, 0.456, 0.406]
+    DEFAULT_STD = [0.229, 0.224, 0.225]
 
-    # Face/mask detection
-    MIN_FACE_SIZE = (30, 30)
-    SCALE_FACTOR = 1.1
-    MIN_NEIGHBORS = 4
+    # A suspicious class must reach this probability for a full boost
+    CONFIDENCE_THRESHOLD = 0.60
 
-    # Loitering
-    LOITER_THRESHOLD_SECONDS_DEFAULT = 30.0
-    LOITER_MOVEMENT_PIXELS_DEFAULT = 20.0
-    LOITER_MIN_PERSON_AREA = 1500  # need a real-sized blob to count
+    # -- Leaky accumulator (same concept as FireModel) ----------------------
+    BOOST_RATE = 1.0        # suspicious class on top, >= threshold
+    PARTIAL_BOOST = 0.4     # suspicious class on top, below threshold
+    DECAY_RATE = 0.3        # normal class on top
+    SCORE_THRESHOLD = 3.0   # activity_score must reach this to confirm
+    SCORE_CAP = 10.0        # upper clamp on activity_score
+
+    # Every class except this one counts as suspicious
+    NORMAL_CLASS = "normal"
+
+    # ONNX Runtime intra-op threads (0 = runtime default).  Capped via config
+    # so it doesn't compete with the fire and face presence sessions.
+    INTRA_OP_THREADS = 0
+
+    DEBUG_LOG_EVERY_N_FRAMES = 10
+
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
 
     def __init__(
         self,
-        loitering_threshold_seconds: float = LOITER_THRESHOLD_SECONDS_DEFAULT,
-        loitering_movement_pixels: float = LOITER_MOVEMENT_PIXELS_DEFAULT,
+        model_path: Optional[str] = None,
+        label_map_path: Optional[str] = None,
+        confidence_threshold: float = CONFIDENCE_THRESHOLD,
+        score_threshold: float = SCORE_THRESHOLD,
+        score_cap: float = SCORE_CAP,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
-        self._loiter_threshold_s = float(loitering_threshold_seconds)
-        self._loiter_movement_px = float(loitering_movement_pixels)
+        self._intra_op_threads = intra_op_threads
+        self._model_path = model_path or self.MODEL_PATH
+        self._label_map_path = label_map_path or self.LABEL_MAP_PATH
+        self._conf_threshold = confidence_threshold
+        self._score_threshold = score_threshold
+        self._score_cap = score_cap
 
-        self._hog: Optional[cv2.HOGDescriptor] = None
-        self._face_cascade: Optional[cv2.CascadeClassifier] = None
-        self._bg_subtractor: Optional[Any] = None
-        self._prev_gray: Optional[np.ndarray] = None
+        # Runtime state
+        self._session: Any = None            # ort.InferenceSession
+        self._input_name: str = "input"
+        self._classes: List[str] = list(self.DEFAULT_CLASSES)
+        self._img_size: int = self.DEFAULT_IMG_SIZE
+        self._mean = np.array(self.DEFAULT_MEAN, dtype=np.float32).reshape(3, 1, 1)
+        self._std = np.array(self.DEFAULT_STD, dtype=np.float32).reshape(3, 1, 1)
 
-        # Loitering state
-        self._anchor_centroid: Optional[Tuple[float, float]] = None
-        self._anchor_time: float = 0.0  # monotonic time the anchor was set
-        self._last_centroid: Optional[Tuple[float, float]] = None
+        self._activity_score: float = 0.0
+        self._frame_count: int = 0
+        # Suspicious class that last raised the score, and its probability.
+        # Reported while a confirmed alert decays, so it never reads "normal".
+        self._active_class: Optional[str] = None
+        self._active_conf: float = 0.0
 
-        # Suspicious-object temporal validation
-        self._suspicious_obj_count: int = 0
+    # -- BaseModel hooks ----------------------------------------------------
 
     def _do_load(self) -> None:
-        self._hog = cv2.HOGDescriptor(
-            self.HOG_WIN_SIZE, self.HOG_BLOCK_SIZE,
-            self.HOG_BLOCK_STRIDE, self.HOG_CELL_SIZE, self.HOG_NBINS,
-        )
-        self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        self._reset_temporal_state()
+        self._load_label_map()
 
-        self._face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        if not os.path.isfile(self._model_path):
+            logger.error(
+                "Activity ONNX model not found at %s - activity detection disabled.  "
+                "Place sentinel_activity_mnv3.onnx and activity_label_map.json "
+                "in data/model_artifacts/models/.",
+                self._model_path,
+            )
+            self._session = None
+            return
+
+        import onnxruntime as ort  # noqa: E402 – deferred to avoid import cost
+
+        self._session = ort.InferenceSession(
+            self._model_path,
+            sess_options=session_options(self._intra_op_threads),
+            providers=["CPUExecutionProvider"],
         )
 
-        self._bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=120, varThreshold=40, detectShadows=False,
+        # Read the real input name and spatial size from the ONNX graph so
+        # preprocessing always matches the model.  Shape is [batch, 3, S, S].
+        model_input = self._session.get_inputs()[0]
+        self._input_name = model_input.name
+        shape = model_input.shape
+        if len(shape) == 4 and isinstance(shape[2], int) and isinstance(shape[3], int):
+            if shape[2] != self._img_size:
+                logger.info(
+                    "Overriding activity img_size %d -> %d (from ONNX)",
+                    self._img_size, shape[2],
+                )
+                self._img_size = int(shape[2])
+
+        logger.info(
+            "ActivityModel loaded - MobileNetV3 ONNX, classes=%s, size=%d, "
+            "conf=%.2f, trigger=%.1f, input=%s, threads=%s",
+            self._classes, self._img_size, self._conf_threshold,
+            self._score_threshold, self._input_name,
+            self._intra_op_threads or "default",
         )
 
-        self._prev_gray = None
-        self._anchor_centroid = None
-        self._anchor_time = 0.0
-        self._last_centroid = None
-        self._suspicious_obj_count = 0
+    def _do_unload(self) -> None:
+        self._reset_temporal_state()
+        if self._session is not None:
+            del self._session
+            self._session = None
+
+    def _load_label_map(self) -> None:
+        """Read classes, input size and normalisation from the label map."""
+        if not os.path.isfile(self._label_map_path):
+            logger.warning(
+                "Activity label map not found at %s; using defaults",
+                self._label_map_path,
+            )
+            return
+        try:
+            with open(self._label_map_path, "r") as f:
+                meta = json.load(f)
+            classes = list(meta.get("classes", self.DEFAULT_CLASSES))
+            img_size = int(meta.get("img_size", self.DEFAULT_IMG_SIZE))
+            mean = np.array(
+                meta.get("mean", self.DEFAULT_MEAN), dtype=np.float32,
+            ).reshape(3, 1, 1)
+            std = np.array(
+                meta.get("std", self.DEFAULT_STD), dtype=np.float32,
+            ).reshape(3, 1, 1)
+        except Exception as exc:
+            logger.warning("Activity label map unreadable (%s); using defaults", exc)
+            return
+        # Assign only once everything parsed, so a bad file can't half-apply.
+        self._classes, self._img_size = classes, img_size
+        self._mean, self._std = mean, std
+
+    def _reset_temporal_state(self) -> None:
+        self._activity_score = 0.0
+        self._frame_count = 0
+        self._active_class = None
+        self._active_conf = 0.0
+
+    # -----------------------------------------------------------------------
+    # Prediction
+    # -----------------------------------------------------------------------
 
     def _do_predict(self, frame: Any) -> Dict[str, Any]:
         h, w = frame.shape[:2]
         frame_size = (int(w), int(h))
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self._frame_count += 1
 
-        # Always update background model so it tracks lighting drift
-        fg_mask = self._bg_subtractor.apply(gray)
+        # If the ONNX model was never loaded, return a safe "nothing detected".
+        if self._session is None:
+            return self._empty_result(frame_size)
 
-        masked = self._detect_masked_face(frame, gray)
-        if masked["detected"]:
-            self._reset_loiter()
-            self._suspicious_obj_count = 0
-            return _result("masked_face", masked, frame_size)
+        blob = self._preprocess(frame)
+        logits = self._session.run(None, {self._input_name: blob})[0]
 
-        suspicious_obj = self._detect_suspicious_object(fg_mask)
-        if suspicious_obj is not None:
-            self._reset_loiter()
-            return _result(suspicious_obj["activity_type"], suspicious_obj, frame_size)
+        # The model returns RAW LOGITS — softmax is applied here, exactly once.
+        probs = self._softmax(np.asarray(logits, dtype=np.float32).reshape(-1))
 
-        loiter = self._detect_loitering(frame, fg_mask)
-        if loiter["detected"]:
-            return _result("loitering", loiter, frame_size)
+        top_idx = int(np.argmax(probs))
+        top_class = (
+            self._classes[top_idx] if top_idx < len(self._classes) else "unknown"
+        )
+        top_prob = float(probs[top_idx])
+        is_suspicious = top_class != self.NORMAL_CLASS
 
-        self._prev_gray = gray.copy()
+        # ----- Leaky accumulator update ------------------------------------
+        if is_suspicious and top_prob >= self._conf_threshold:
+            self._activity_score = min(
+                self._activity_score + self.BOOST_RATE, self._score_cap,
+            )
+        elif is_suspicious:
+            self._activity_score = min(
+                self._activity_score + self.PARTIAL_BOOST, self._score_cap,
+            )
+        else:
+            self._activity_score = max(self._activity_score - self.DECAY_RATE, 0.0)
+
+        if is_suspicious:
+            self._active_class = top_class
+            self._active_conf = top_prob
+
+        confirmed = self._activity_score >= self._score_threshold
+
+        # A confirmed alert is held through "normal" frames while the score
+        # decays; keep reporting the suspicious class that raised it.
+        if confirmed:
+            activity_type = self._active_class
+            confidence = round(min(99.0, self._active_conf * 100.0), 2)
+        else:
+            activity_type = "none"
+            confidence = round(min(99.0, top_prob * 100.0), 2)
+
+        # Per-class probability map (current frame) for the dashboard / logs
+        class_probs = {
+            self._classes[i]: round(float(probs[i]) * 100.0, 2)
+            for i in range(min(len(self._classes), probs.shape[0]))
+        }
+
+        # ----- Debug logging -----------------------------------------------
+        if self._frame_count % self.DEBUG_LOG_EVERY_N_FRAMES == 0:
+            logger.info(
+                "Activity debug: top=%s (%.1f%%), score=%.1f/%.1f, "
+                "confirmed=%s, probs=%s",
+                top_class, top_prob * 100.0, self._activity_score,
+                self._score_threshold, confirmed, class_probs,
+            )
+
+        return {
+            "detected": bool(confirmed),
+            "activity_detected": bool(confirmed),
+            "suspicious": bool(confirmed),
+            "activity_type": activity_type,
+            "severity_level": activity_type,
+            "confidence": confidence,
+            "confidence_pct": confidence,
+            "bbox": None,              # whole-frame classifier, no box
+            "frame_size": frame_size,
+            "activity_score": round(self._activity_score, 2),
+            "class_probabilities": class_probs,
+        }
+
+    # -----------------------------------------------------------------------
+    # Pre / post-processing
+    # -----------------------------------------------------------------------
+
+    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
+        """Resize to img_size, BGR->RGB, HWC->CHW, ImageNet-normalise, add batch.
+
+        Plain resize (no letterbox) — this is a classifier, not a detector.
+        """
+        img = cv2.resize(
+            frame, (self._img_size, self._img_size), interpolation=cv2.INTER_LINEAR,
+        )
+        img = img[:, :, ::-1].transpose(2, 0, 1)        # BGR -> RGB, HWC -> CHW
+        img = np.ascontiguousarray(img, dtype=np.float32) / 255.0
+        img = (img - self._mean) / self._std              # ImageNet normalisation
+        return img[np.newaxis, ...]                       # (1, 3, S, S)
+
+    @staticmethod
+    def _softmax(x: np.ndarray) -> np.ndarray:
+        e = np.exp(x - np.max(x))
+        return e / np.sum(e)
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _empty_result(frame_size: Tuple[int, int]) -> Dict[str, Any]:
         return {
             "detected": False,
+            "activity_detected": False,
             "suspicious": False,
             "activity_type": "none",
+            "severity_level": "none",
             "confidence": 0.0,
+            "confidence_pct": 0.0,
             "bbox": None,
             "frame_size": frame_size,
+            "activity_score": 0.0,
+            "class_probabilities": {},
         }
-
-    # ------------------------------------------------------------------
-    # Masked-face detection
-    # ------------------------------------------------------------------
-
-    def _detect_masked_face(self, frame: Any, gray: np.ndarray) -> Dict[str, Any]:
-        faces = self._face_cascade.detectMultiScale(
-            gray, scaleFactor=self.SCALE_FACTOR,
-            minNeighbors=self.MIN_NEIGHBORS, minSize=self.MIN_FACE_SIZE,
-        )
-        for (x, y, w, h) in faces:
-            lower_face = gray[y + h // 2 : y + h, x : x + w]
-            if lower_face.size == 0:
-                continue
-            variance = float(np.var(lower_face))
-            edge_density = float(np.mean(cv2.Canny(lower_face, 50, 150)))
-            if variance < 400 and edge_density < 15:
-                confidence = max(0.5, 1.0 - variance / 800)
-                return {
-                    "detected": True,
-                    "confidence": round(confidence, 4),
-                    "bbox": (int(x), int(y), int(w), int(h)),
-                }
-        return {"detected": False, "confidence": 0.0, "bbox": None}
-
-    # ------------------------------------------------------------------
-    # Suspicious object (formerly "weapon_like_object") detection
-    # ------------------------------------------------------------------
-
-    def _detect_suspicious_object(
-        self, fg_mask: np.ndarray,
-    ) -> Optional[Dict[str, Any]]:
-        """Detect elongated foreground objects.
-
-        The HOG+SVM-style "weapon" classifier was prone to confusing fingers
-        and hand edges with weapons. We now apply two safeguards:
-
-        1. **Confidence tiers**: only call it ``suspicious_object`` above 80%;
-           60-80% is reported as ``possible_concern``; anything weaker is
-           dropped entirely.
-        2. **Temporal validation**: a candidate object must be seen for 3
-           consecutive frames before any suspicious result is reported.
-        """
-        candidate = self._best_elongated_candidate(fg_mask)
-        if candidate is None:
-            self._suspicious_obj_count = 0
-            return None
-
-        confidence = candidate["confidence"]
-        # Anything below the "possible_concern" floor is treated as no
-        # detection at all and resets the temporal counter.
-        if confidence < self.POSSIBLE_CONCERN_THRESHOLD:
-            self._suspicious_obj_count = 0
-            return None
-
-        self._suspicious_obj_count += 1
-        if self._suspicious_obj_count < self.SUSPICIOUS_OBJECT_MIN_CONSECUTIVE:
-            return None
-
-        if confidence >= self.SUSPICIOUS_OBJECT_THRESHOLD:
-            activity = "suspicious_object"
-        else:
-            activity = "possible_concern"
-
-        return {
-            "detected": True,
-            "activity_type": activity,
-            "confidence": round(float(confidence), 4),
-            "bbox": candidate["bbox"],
-            "consecutive_frames": self._suspicious_obj_count,
-        }
-
-    def _best_elongated_candidate(
-        self, fg_mask: np.ndarray,
-    ) -> Optional[Dict[str, Any]]:
-        """Return the highest-confidence elongated foreground contour, if any."""
-        _, mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best: Optional[Dict[str, Any]] = None
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < self.MIN_ELONGATED_AREA:
-                continue
-            rect = cv2.minAreaRect(cnt)
-            (_, (rw, rh), _) = rect
-            if rw < 1 or rh < 1:
-                continue
-            aspect = max(rw, rh) / min(rw, rh)
-            if aspect < self.ELONGATION_RATIO:
-                continue
-            confidence = min(1.0, aspect / 8.0)
-            if best is None or confidence > best["confidence"]:
-                x, y, w, h = cv2.boundingRect(cnt)
-                best = {
-                    "confidence": float(confidence),
-                    "bbox": (int(x), int(y), int(w), int(h)),
-                }
-        return best
-
-    # ------------------------------------------------------------------
-    # Loitering — wall-clock + centroid tracking
-    # ------------------------------------------------------------------
-
-    def _detect_loitering(self, frame: np.ndarray, fg_mask: np.ndarray) -> Dict[str, Any]:
-        person_bbox = self._find_person_bbox(frame, fg_mask)
-        if person_bbox is None:
-            # No person visible — clear the anchor so a future appearance starts fresh.
-            self._reset_loiter()
-            return {"detected": False, "confidence": 0.0, "bbox": None}
-
-        cx = person_bbox[0] + person_bbox[2] / 2.0
-        cy = person_bbox[1] + person_bbox[3] / 2.0
-        centroid = (cx, cy)
-        self._last_centroid = centroid
-        now = time.monotonic()
-
-        if self._anchor_centroid is None:
-            self._anchor_centroid = centroid
-            self._anchor_time = now
-            return {"detected": False, "confidence": 0.0, "bbox": person_bbox}
-
-        ax, ay = self._anchor_centroid
-        movement = float(np.hypot(cx - ax, cy - ay))
-
-        if movement > self._loiter_movement_px:
-            # Person moved enough — restart the timer at the new position.
-            self._anchor_centroid = centroid
-            self._anchor_time = now
-            return {"detected": False, "confidence": 0.0, "bbox": person_bbox}
-
-        elapsed = now - self._anchor_time
-        if elapsed >= self._loiter_threshold_s:
-            return {
-                "detected": True,
-                "confidence": round(
-                    _loiter_confidence(elapsed, self._loiter_threshold_s), 4,
-                ),
-                "bbox": person_bbox,
-                "duration_seconds": round(elapsed, 2),
-            }
-
-        return {"detected": False, "confidence": 0.0, "bbox": person_bbox}
-
-    def _find_person_bbox(
-        self, frame: np.ndarray, fg_mask: np.ndarray,
-    ) -> Optional[Tuple[int, int, int, int]]:
-        """Return (x, y, w, h) of the most-likely person, or None.
-
-        Strategy: try HOG people detector first (specific but slower); if it
-        finds nothing usable, fall back to the largest sufficiently-sized
-        foreground blob from the MOG2 background subtractor.
-        """
-        try:
-            rects, _ = self._hog.detectMultiScale(
-                frame, winStride=(8, 8), padding=(8, 8), scale=1.05,
-            )
-        except cv2.error:
-            rects = []
-
-        if len(rects):
-            x, y, w, h = max(
-                rects, key=lambda r: r[2] * r[3],
-            )
-            return (int(x), int(y), int(w), int(h))
-
-        # Foreground-mask fallback
-        _, mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None
-        largest = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest) < self.LOITER_MIN_PERSON_AREA:
-            return None
-        x, y, w, h = cv2.boundingRect(largest)
-        return (int(x), int(y), int(w), int(h))
-
-    def _reset_loiter(self) -> None:
-        self._anchor_centroid = None
-        self._anchor_time = 0.0
-        self._last_centroid = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def _do_unload(self) -> None:
-        self._hog = None
-        self._face_cascade = None
-        self._bg_subtractor = None
-        self._prev_gray = None
-        self._suspicious_obj_count = 0
-        self._reset_loiter()
-
-
-def _loiter_confidence(elapsed_seconds: float, threshold_seconds: float) -> float:
-    """Confidence as a function of how long the person has lingered.
-
-    Scaled to the configured threshold so the spec values
-    (1x threshold → 0.50, 2x → 0.75, 3x+ → 0.90, then asymptote to 0.99)
-    apply at any threshold setting.
-
-    With the default 30s threshold this matches the spec exactly:
-    30s → 0.50, 60s → 0.75, 90s → 0.90, longer → up to 0.99.
-    """
-    if threshold_seconds <= 0:
-        return 0.0
-    if elapsed_seconds < threshold_seconds:
-        return 0.0
-    ratio = elapsed_seconds / float(threshold_seconds)
-    if ratio < 2.0:
-        # 1x → 2x threshold: linear 0.50 → 0.75
-        return 0.50 + (ratio - 1.0) * 0.25
-    if ratio < 3.0:
-        # 2x → 3x threshold: linear 0.75 → 0.90
-        return 0.75 + (ratio - 2.0) * 0.15
-    # Beyond 3x: asymptote toward 0.99
-    return min(0.99, 0.90 + (ratio - 3.0) / 20.0 * 0.09)
-
-
-def _result(activity: str, hit: Dict[str, Any], frame_size: Tuple[int, int]) -> Dict[str, Any]:
-    out = {
-        "detected": True,
-        "suspicious": True,
-        "activity_type": activity,
-        "confidence": hit["confidence"],
-        "bbox": hit.get("bbox"),
-        "frame_size": frame_size,
-    }
-    if "duration_seconds" in hit:
-        out["duration_seconds"] = hit["duration_seconds"]
-    return out

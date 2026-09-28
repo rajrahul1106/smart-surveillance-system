@@ -12,6 +12,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from core.config import (
+    ActivityConfig,
     AppConfig,
     AlertsConfig,
     CameraConfig,
@@ -242,6 +243,12 @@ camera:
         with pytest.raises(ValueError, match="fire.score_cap"):
             cfg.validate()
 
+    def test_activity_validation(self):
+        with pytest.raises(ValueError, match="activity.score_cap"):
+            AppConfig(activity=ActivityConfig(score_threshold=3.0, score_cap=2.0)).validate()
+        with pytest.raises(ValueError, match="activity.intra_op_threads"):
+            AppConfig(activity=ActivityConfig(intra_op_threads=-1)).validate()
+
     def test_negative_intra_op_threads(self):
         with pytest.raises(ValueError, match="fire.intra_op_threads"):
             AppConfig(fire=FireConfig(intra_op_threads=-1)).validate()
@@ -307,6 +314,26 @@ class TestDefaults:
         assert cfg.fire.labels_path.endswith("fire_yolo11s_labels.json")
         assert cfg.fire.confidence_threshold == 0.35
         assert cfg.fire.input_size == 480
+
+    def test_activity_defaults_match_activity_model(self):
+        from models.activity_model import ActivityModel
+
+        cfg = ActivityConfig()
+        assert cfg.model_path == ActivityModel.MODEL_PATH
+        assert cfg.label_map_path == ActivityModel.LABEL_MAP_PATH
+        assert cfg.confidence_threshold == ActivityModel.CONFIDENCE_THRESHOLD
+        assert cfg.score_threshold == ActivityModel.SCORE_THRESHOLD
+        assert cfg.score_cap == ActivityModel.SCORE_CAP
+        assert cfg.intra_op_threads == ActivityModel.INTRA_OP_THREADS
+
+    def test_repo_config_loads_activity_section(self):
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.activity.model_path.endswith("sentinel_activity_mnv3.onnx")
+        assert cfg.activity.label_map_path.endswith("activity_label_map.json")
+        assert cfg.activity.confidence_threshold == 0.60
+        assert cfg.activity.score_threshold == 3.0
+        assert cfg.activity.score_cap == 10.0
+        assert cfg.activity.intra_op_threads == 1
 
     def test_repo_config_caps_onnx_threads(self):
         # Measured on the M2: fire 4 / face 1 keeps ACTIVE_DETECTION at 30 FPS

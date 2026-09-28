@@ -33,11 +33,17 @@ fire:
   score_cap: 10.0
   intra_op_threads: 4          # ONNX threads (0 = runtime default); 4 = M2 performance cores
 
+activity:
+  model_path: "data/model_artifacts/models/sentinel_activity_mnv3.onnx"
+  label_map_path: "data/model_artifacts/models/activity_label_map.json"
+  confidence_threshold: 0.60
+  score_threshold: 3.0
+  score_cap: 10.0
+  intra_op_threads: 1          # ONNX threads (0 = runtime default); ~2-3 ms per call
+
 detection:
   active_timeout_seconds: 30
   cooldown_seconds: 5
-  loitering_threshold_seconds: 30.0
-  loitering_movement_pixels: 20.0
 
 alerts:
   dry_run: true

@@ -19,7 +19,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | **IDLE** | Monitors for SOS gesture only. All detection models offline. Minimal CPU usage. |
 | **VERIFYING_GESTURE** | Validates 4-step Palm→Fist→Palm→Fist sequence at 99% confidence per gesture. |
 | **VERIFYING_IDENTITY** | ArcFace face authentication against enrolled identities. 3 attempt limit. |
-| **ACTIVE_DETECTION** | Fire (YOLO11s), injury (MediaPipe Pose), and activity (HOG+SVM) detection run in parallel. |
+| **ACTIVE_DETECTION** | Fire (YOLO11s), injury (MediaPipe Pose), and activity (MobileNetV3-Small) detection run in parallel. |
 | **COOLDOWN** | Unloads all models, clears state, prepares for next cycle. |
 
 ---
@@ -30,11 +30,11 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 - **Face Authentication** — InsightFace ArcFace (buffalo_l) with cosine similarity matching against enrolled identities
 - **Fire Detection** — YOLO11s ONNX model (480×480) trained on D-Fire, including ~9,800 fire-free images such as lamps and sun glare, plus two Roboflow fire/smoke datasets, with leaky-accumulator temporal verification
 - **Injury Detection** — MediaPipe Pose estimation for fallen/collapsed person detection
-- **Activity Monitoring** — HOG+SVM for suspicious activity classification
+- **Activity Monitoring** — MobileNetV3-Small ONNX classifier (normal / robbery / violence) with leaky-accumulator temporal verification
 - **Live Dashboard** — Cyberpunk-themed SENTINEL web dashboard with real-time MJPEG video, state telemetry, model status, and alert history via WebSocket
 - **Long-Range Detection** — Gesture recognition at 2-3m using center-crop upscaling (1.67x digital zoom)
 - **State-Driven Architecture** — Event-bus pattern with per-state model loading/unloading. No if/elif chains.
-- **243 Passing Tests** — Comprehensive test coverage across all models and pipeline states
+- **254 Passing Tests** — Comprehensive test coverage across all models and pipeline states
 
 ---
 
@@ -47,7 +47,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | Fire False-Positive Frames | 1.0% (D-Fire negatives, conf 0.35) |
 | Detection Range | 2–3 meters |
 | Auth Latency | < 2 seconds |
-| Test Suite | 243 passing |
+| Test Suite | 254 passing |
 | Fire Training Images | ~21,500 D-Fire + 2 Roboflow sets |
 
 ---
@@ -61,7 +61,7 @@ IDLE → VERIFYING_GESTURE → VERIFYING_IDENTITY → ACTIVE_DETECTION → COOLD
 | **Face Auth** | InsightFace ArcFace (buffalo_l), ONNX Runtime |
 | **Fire Detection** | YOLO11s, ONNX Runtime, trained on D-Fire + Roboflow datasets |
 | **Injury** | MediaPipe Pose Estimation |
-| **Activity** | HOG + SVM |
+| **Activity** | MobileNetV3-Small, ONNX Runtime |
 | **API** | FastAPI, WebSocket, MJPEG streaming |
 | **Dashboard** | HTML/CSS/JS (cyberpunk theme) |
 | **Database** | SQLite |
@@ -96,7 +96,7 @@ smart_surveillance/
 │   ├── face_model.py                # InsightFace ArcFace recognition
 │   ├── fire_model.py                # YOLO11s ONNX fire/smoke detection
 │   ├── injury_model.py              # MediaPipe pose injury detection
-│   └── activity_model.py            # HOG+SVM activity monitoring
+│   └── activity_model.py            # MobileNetV3-Small ONNX activity classifier
 ├── services/
 │   ├── alert_service.py             # Alert dispatching (DRY RUN / live)
 │   ├── storage_service.py           # SQLite persistence
@@ -111,13 +111,15 @@ smart_surveillance/
 ├── data/
 │   └── model_artifacts/
 │       └── models/
-│           ├── buffalo_l/                  # InsightFace ArcFace models
-│           ├── fire_yolo11s_480.onnx       # YOLO11s fire/smoke detector (480×480)
-│           └── fire_yolo11s_labels.json    # Fire classes and thresholds
+│           ├── buffalo_l/                    # InsightFace ArcFace models
+│           ├── fire_yolo11s_480.onnx         # YOLO11s fire/smoke detector (480×480)
+│           ├── fire_yolo11s_labels.json      # Fire classes and thresholds
+│           ├── sentinel_activity_mnv3.onnx   # MobileNetV3-Small activity classifier
+│           └── activity_label_map.json       # Activity classes + preprocessing
 ├── scripts/
 │   └── train_fire_model.py          # Superseded Roboflow-only fire trainer (reference)
 └── tests/
-    └── test_models.py               # 243 tests
+    └── test_models.py               # 254 tests
 ```
 
 ---
@@ -162,7 +164,14 @@ mkdir -p data/model_artifacts/models/buffalo_l
 - False-positive frame rate at conf 0.35: 1.0% on D-Fire negatives
 - Files required in `data/model_artifacts/models/`: `fire_yolo11s_480.onnx`, `fire_yolo11s_labels.json`
 
-The model is trained in the D-Fire YOLO11s Colab notebook. ONNX files are gitignored, so copy both files into place before running. `scripts/train_fire_model.py` trains the older Roboflow-only model and is kept for reference only.
+The model is trained in the D-Fire YOLO11s Colab notebook. ONNX files are gitignored, so copy the `.onnx` into place before running; the labels JSON is committed. `scripts/train_fire_model.py` trains the older Roboflow-only model and is kept for reference only.
+
+**Activity Classification (MobileNetV3-Small):**
+
+- `sentinel_activity_mnv3.onnx` — ONNX classifier (~6 MB). ONNX files are gitignored, so copy it into `data/model_artifacts/models/` before running.
+- `activity_label_map.json` — class names and preprocessing settings; committed next to the model.
+
+If the ONNX file is missing, activity detection is disabled (an error is logged) and the rest of the system still runs.
 
 ### Face Enrollment
 
@@ -213,7 +222,7 @@ Open the dashboard: **http://localhost:8000/dashboard**
 pytest tests/ -v
 ```
 
-All 243 tests should pass.
+All 254 tests should pass.
 
 ---
 
@@ -255,7 +264,7 @@ alerts:
 
 **Leaky Accumulator:** Fire detection uses a score-based system instead of binary frame counting. A single frame dip doesn't reset detection — the score decays gradually, preventing flapping between detected/not-detected states.
 
-**Per-State Model Loading:** Only the models needed for the current state are loaded in memory. IDLE loads only the gesture model (~50MB). ACTIVE_DETECTION loads fire + injury + activity (~45MB combined). Face model (~500MB) loads only during VERIFYING_IDENTITY and unloads immediately after.
+**Per-State Model Loading:** Only the models needed for the current state are loaded in memory. IDLE loads only the gesture model (~50MB). ACTIVE_DETECTION loads fire + injury + activity (~50MB combined). Face model (~500MB) loads only during VERIFYING_IDENTITY and unloads immediately after.
 
 ---
 
