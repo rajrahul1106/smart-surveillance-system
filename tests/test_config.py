@@ -242,6 +242,12 @@ camera:
         with pytest.raises(ValueError, match="fire.score_cap"):
             cfg.validate()
 
+    def test_negative_intra_op_threads(self):
+        with pytest.raises(ValueError, match="fire.intra_op_threads"):
+            AppConfig(fire=FireConfig(intra_op_threads=-1)).validate()
+        with pytest.raises(ValueError, match="face_auth.intra_op_threads"):
+            AppConfig(face_auth=FaceAuthConfig(intra_op_threads=-1)).validate()
+
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -270,6 +276,7 @@ class TestDefaults:
         assert cfg.track_max_missed == FaceModel.TRACK_MAX_MISSED
         assert cfg.max_faces == FaceModel.MAX_FACES
         assert cfg.presence_interval_frames == 10
+        assert cfg.intra_op_threads == FaceModel.INTRA_OP_THREADS
 
     def test_repo_config_loads_multi_person_face_keys(self):
         cfg = load_config(os.path.join(_project_root, "config.yaml"))
@@ -292,6 +299,7 @@ class TestDefaults:
         assert cfg.input_size == FireModel.INPUT_SIZE
         assert cfg.score_threshold == FireModel.SCORE_THRESHOLD
         assert cfg.score_cap == FireModel.SCORE_CAP
+        assert cfg.intra_op_threads == FireModel.INTRA_OP_THREADS
 
     def test_repo_config_uses_yolo11s_at_conf_035(self):
         cfg = load_config(os.path.join(_project_root, "config.yaml"))
@@ -299,6 +307,13 @@ class TestDefaults:
         assert cfg.fire.labels_path.endswith("fire_yolo11s_labels.json")
         assert cfg.fire.confidence_threshold == 0.35
         assert cfg.fire.input_size == 480
+
+    def test_repo_config_caps_onnx_threads(self):
+        # Measured on the M2: fire 4 / face 1 keeps ACTIVE_DETECTION at 30 FPS
+        # with no backlog while the face presence worker runs.
+        cfg = load_config(os.path.join(_project_root, "config.yaml"))
+        assert cfg.fire.intra_op_threads == 4
+        assert cfg.face_auth.intra_op_threads == 1
 
     def test_app_config_all_sections_populated(self):
         cfg = AppConfig()

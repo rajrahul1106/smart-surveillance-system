@@ -544,6 +544,36 @@ class TestFaceModelMultiFace:
         assert model._tracker.tracks == []
         assert model.mode == "verify"
 
+    def test_thread_cap_applies_in_presence_mode_only(self):
+        # insightface only forwards providers to its sessions, so the cap is
+        # applied by rebuilding them; verify mode keeps the runtime default.
+        model = _face_model_with([], intra_op_threads=1)
+        det = MagicMock(model_file="det_10g.onnx")
+        rec = MagicMock(model_file="w600k_r50.onnx")
+        model._app.models = {"detection": det, "recognition": rec}
+
+        def fake_session(path, sess_options, providers):
+            return (path, sess_options.intra_op_num_threads)
+
+        with patch("onnxruntime.InferenceSession", side_effect=fake_session) as ctor:
+            model.set_mode("presence")
+            assert det.session == ("det_10g.onnx", 1)
+            assert rec.session == ("w600k_r50.onnx", 1)
+            model.set_mode("presence")  # already capped: no rebuild
+            assert ctor.call_count == 2
+            model.set_mode("verify")    # back to the runtime default
+            assert det.session == ("det_10g.onnx", 0)
+            assert rec.session == ("w600k_r50.onnx", 0)
+        model.unload()
+
+    def test_no_thread_cap_leaves_insightface_sessions_alone(self):
+        model = _face_model_with([])
+        model._app.models = {"detection": MagicMock(model_file="det_10g.onnx")}
+        with patch("onnxruntime.InferenceSession") as ctor:
+            model.set_mode("presence")
+        ctor.assert_not_called()
+        model.unload()
+
 
 # ---------------------------------------------------------------------------
 # FireModel (YOLO11s ONNX)
@@ -705,6 +735,26 @@ class TestFireModel:
         assert ("FireModel loaded - YOLO11s ONNX, input=[1,3,480,480], "
                 "classes=['fire','smoke'], conf=0.35, iou=0.45, trigger=3.0") in caplog.text
         model.unload()
+
+    def test_session_uses_configured_thread_cap(self, tmp_path):
+        model_file = tmp_path / "fire.onnx"
+        model_file.write_bytes(b"")  # only has to exist; the session is mocked
+        session = MagicMock()
+        session.get_inputs.return_value = [MagicMock(shape=[1, 3, 480, 480])]
+        session.get_modelmeta.return_value.custom_metadata_map = {}
+
+        model = FireModel(model_path=str(model_file), intra_op_threads=4)
+        with patch("onnxruntime.InferenceSession", return_value=session) as ctor:
+            model.load()
+        assert ctor.call_args.kwargs["sess_options"].intra_op_num_threads == 4
+        model.unload()
+
+
+def test_session_options_caps_intra_op_threads():
+    from models.ort_options import session_options
+
+    assert session_options(0).intra_op_num_threads == 0  # runtime default
+    assert session_options(3).intra_op_num_threads == 3
 
 
 @requires_real_fire_model

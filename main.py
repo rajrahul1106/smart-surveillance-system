@@ -76,6 +76,7 @@ def main() -> None:
         unknown_confirm_frames=face_auth.unknown_confirm_frames,
         track_max_missed=face_auth.track_max_missed,
         max_faces=face_auth.max_faces,
+        intra_op_threads=face_auth.intra_op_threads,
     )
     fire_cfg = cfg.fire
     fire_model = FireModel(
@@ -86,6 +87,7 @@ def main() -> None:
         input_size=fire_cfg.input_size,
         score_threshold=fire_cfg.score_threshold,
         score_cap=fire_cfg.score_cap,
+        intra_op_threads=fire_cfg.intra_op_threads,
     )
     injury_model = InjuryModel()
     activity_model = ActivityModel(

@@ -38,6 +38,7 @@ import cv2
 import numpy as np
 
 from models.base_model import BaseModel
+from models.ort_options import session_options
 from models.face_tracker import (
     AUTHORIZED,
     FaceDetection,
@@ -93,6 +94,12 @@ class FaceModel(BaseModel):
     TRACK_MAX_MISSED = 10
     MAX_FACES = 6
 
+    # ONNX Runtime intra-op threads for the insightface sessions in presence
+    # mode (0 = runtime default).  Capped via config so presence runs on the
+    # worker thread don't take every core from the fire model on the
+    # pipeline thread; verify mode always keeps the runtime default.
+    INTRA_OP_THREADS = 0
+
     def __init__(
         self,
         encodings_path: str = ENCODINGS_PATH_DEFAULT,
@@ -104,9 +111,12 @@ class FaceModel(BaseModel):
         unknown_confirm_frames: int = UNKNOWN_CONFIRM_FRAMES,
         track_max_missed: int = TRACK_MAX_MISSED,
         max_faces: int = MAX_FACES,
+        intra_op_threads: int = INTRA_OP_THREADS,
     ) -> None:
         super().__init__()
         self._encodings_path = encodings_path
+        self._intra_op_threads = intra_op_threads
+        self._session_threads = 0  # cap the current insightface sessions use
         self._model_root = model_root
         self._authorize_threshold = match_threshold
         self._possible_threshold = possible_threshold
@@ -148,6 +158,7 @@ class FaceModel(BaseModel):
         with self._lock:
             self._mode = mode
             self._apply_det_thresh()
+            self._apply_session_threads()
 
     def _det_thresh(self) -> float:
         return self.VERIFY_DET_THRESH if self._mode == MODE_VERIFY else self.PRESENCE_DET_THRESH
@@ -156,6 +167,28 @@ class FaceModel(BaseModel):
         det_model = getattr(self._app, "det_model", None) if self._app is not None else None
         if det_model is not None:
             det_model.det_thresh = self._det_thresh()
+
+    def _apply_session_threads(self) -> None:
+        """Cap the insightface sessions' threads in presence mode only.
+
+        Presence runs on a worker thread alongside the fire model, so it gets
+        ``intra_op_threads``; verify mode is the only heavy work in
+        VERIFYING_IDENTITY and keeps the runtime default.  insightface only
+        forwards providers to its sessions, so they are rebuilt from the same
+        model files (~0.1 s).  Call with the lock held.
+        """
+        wanted = self._intra_op_threads if self._mode == MODE_PRESENCE else 0
+        if self._app is None or wanted == self._session_threads:
+            return
+        import onnxruntime as ort
+
+        options = session_options(wanted)
+        for model in self._app.models.values():
+            model.session = ort.InferenceSession(
+                model.model_file, sess_options=options,
+                providers=["CPUExecutionProvider"],
+            )
+        self._session_threads = wanted
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -175,19 +208,23 @@ class FaceModel(BaseModel):
         app.prepare(ctx_id=-1, det_size=self.DET_SIZE, det_thresh=self._det_thresh())
         with self._lock:
             self._app = app
+            self._session_threads = 0  # insightface built them uncapped
+            self._apply_session_threads()
             self._tracker.reset()
 
         self._load_encodings()
         logger.info(
-            "FaceModel ready — %d enrolled identit%s, mode=%s",
+            "FaceModel ready — %d enrolled identit%s, mode=%s, threads=%s",
             len(self._known_encodings),
             "y" if len(self._known_encodings) == 1 else "ies",
             self._mode,
+            self._intra_op_threads or "default",
         )
 
     def _do_unload(self) -> None:
         with self._lock:
             self._app = None
+            self._session_threads = 0
             self._known_encodings = {}
             self._tracker.reset()
             self._mode = MODE_VERIFY
